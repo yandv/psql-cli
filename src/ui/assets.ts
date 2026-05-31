@@ -65,6 +65,13 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px
 .pillrow { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
 .pill { padding: 4px 12px; border-radius: 999px; font-size: 12px; }
 .pill.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.proj-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 12px; margin-bottom: 14px; }
+.proj-toolbar .proj-name { font-weight: 600; margin-right: 4px; }
+.proj-toolbar .spacer { flex: 1; }
+button:disabled { opacity: .4; cursor: not-allowed; border-color: var(--border); }
+button:disabled:hover { border-color: var(--border); }
 `;
 
 export const INDEX_HTML = `<!doctype html>
@@ -81,23 +88,16 @@ export const INDEX_HTML = `<!doctype html>
   <div class="spacer"></div>
   <label style="margin:0">default</label>
   <select id="defaultSel" style="width:auto"></select>
+  <button id="addProjBtn">+ Project</button>
   <button class="primary" id="addDbBtn">+ Database</button>
 </header>
 <div class="wrap">
-  <div class="row-top">
-    <div class="col-projects">
-      <div class="card">
-        <h2>Projects</h2>
-        <div id="projectList"></div>
-        <button class="small" id="addProjBtn" style="margin-top:10px">+ Project</button>
-      </div>
-    </div>
-    <div class="col-main">
-      <div class="card">
-        <h2>Databases</h2>
-        <div id="projFilter" class="pillrow"></div>
-        <div id="dbList"></div>
-      </div>
+  <div class="col-main">
+    <div class="card">
+      <h2>Databases</h2>
+      <div id="projFilter" class="pillrow"></div>
+      <div id="projToolbar" class="proj-toolbar" style="display:none"></div>
+      <div id="dbList"></div>
     </div>
   </div>
 </div>
@@ -199,12 +199,31 @@ async function api(method, path, body) {
 }
 async function refresh() { state = await api('GET', '/state'); render(); }
 
+// Canonical order: ascending by 'order' (missing = +Infinity), tiebreak by slug.
+function orderedSlugs(map) {
+  return Object.keys(map).sort((a, b) => {
+    const ao = map[a].order == null ? Infinity : map[a].order;
+    const bo = map[b].order == null ? Infinity : map[b].order;
+    if (ao !== bo) return ao - bo;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+}
+
+async function reorder(kind, slug, dir) {
+  try {
+    await api('POST', '/reorder', { kind, slug, dir });
+    await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
 function el(tag, attrs, ...kids) {
   const e = document.createElement(tag);
   for (const k in (attrs || {})) {
-    if (k === 'class') e.className = attrs[k];
-    else if (k.startsWith('on')) e.addEventListener(k.slice(2), attrs[k]);
-    else e.setAttribute(k, attrs[k]);
+    const v = attrs[k];
+    if (k === 'class') e.className = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else if (v === null || v === undefined || v === false) continue;
+    else e.setAttribute(k, v);
   }
   for (const kid of kids) if (kid != null) e.append(kid.nodeType ? kid : document.createTextNode(kid));
   return e;
@@ -215,28 +234,16 @@ function render() {
   const sel = document.getElementById('defaultSel');
   sel.innerHTML = '';
   sel.append(el('option', { value: '' }, '(none)'));
-  Object.keys(state.databases).sort().forEach(s => {
+  orderedSlugs(state.databases).forEach(s => {
     const o = el('option', { value: s }, s);
     if (s === state.defaultDatabase) o.selected = true;
     sel.append(o);
   });
 
-  // projects
-  const pl = document.getElementById('projectList');
-  pl.innerHTML = '';
-  const projSlugs = Object.keys(state.projects).sort();
-  if (!projSlugs.length) pl.append(el('div', { class: 'empty' }, 'No projects'));
-  projSlugs.forEach(s => {
-    const p = state.projects[s];
-    const count = Object.values(state.databases).filter(d => d.project === s).length;
-    pl.append(el('div', { class: 'proj' },
-      el('div', { class: 'name' }, p.name),
-      el('div', { class: 'meta' }, s + ' · ' + count + ' db'),
-      el('div', { style: 'margin-top:6px;display:flex;gap:6px' },
-        el('button', { class: 'small primary', onclick: () => { currentProjectFilter = s; openDb(null); } }, '+ DB'),
-        el('button', { class: 'small', onclick: () => openProj(s) }, 'Edit'),
-        el('button', { class: 'small danger', onclick: () => delProj(s) }, 'Delete'))));
-  });
+  // canonical project order
+  const projSlugs = orderedSlugs(state.projects);
+  // If the filtered project was deleted, fall back to "All".
+  if (currentProjectFilter && !state.projects[currentProjectFilter]) currentProjectFilter = '';
 
   // project filter (pill row): "All projects" first + pre-selected.
   const pf = document.getElementById('projFilter');
@@ -250,19 +257,37 @@ function render() {
   };
   pf.append(mkPill('', 'All projects'));
   projSlugs.forEach(s => pf.append(mkPill(s, state.projects[s].name)));
-  // If the filtered project was deleted, fall back to "All".
-  if (currentProjectFilter && !state.projects[currentProjectFilter]) currentProjectFilter = '';
 
-  // databases
+  // project toolbar: shown only when a specific project is selected.
+  const pt = document.getElementById('projToolbar');
+  pt.innerHTML = '';
+  if (currentProjectFilter && state.projects[currentProjectFilter]) {
+    const ps = currentProjectFilter;
+    const p = state.projects[ps];
+    const pIdx = projSlugs.indexOf(ps);
+    pt.style.display = 'flex';
+    pt.append(
+      el('span', { class: 'proj-name' }, p.name),
+      el('span', { class: 'meta', style: 'color:var(--muted);font-size:12px' }, ps),
+      el('span', { class: 'spacer' }),
+      el('button', { class: 'small', onclick: () => openProj(ps) }, 'Edit'),
+      el('button', { class: 'small danger', onclick: () => delProj(ps) }, 'Delete'),
+      el('button', { class: 'small', disabled: pIdx <= 0 ? '' : null, onclick: () => reorder('project', ps, 'up') }, '◀ Move'),
+      el('button', { class: 'small', disabled: pIdx >= projSlugs.length - 1 ? '' : null, onclick: () => reorder('project', ps, 'down') }, 'Move ▶'));
+  } else {
+    pt.style.display = 'none';
+  }
+
+  // databases (canonical order, filtered by selected project)
   const dl = document.getElementById('dbList');
   dl.innerHTML = '';
-  let dbSlugs = Object.keys(state.databases).sort();
+  let dbSlugs = orderedSlugs(state.databases);
   if (currentProjectFilter) {
     dbSlugs = dbSlugs.filter(s => state.databases[s].project === currentProjectFilter);
   }
   if (!dbSlugs.length) dl.append(el('div', { class: 'empty' },
     currentProjectFilter ? 'No databases in this project.' : 'No databases yet. Click "+ Database".'));
-  dbSlugs.forEach(s => {
+  dbSlugs.forEach((s, i) => {
     const d = state.databases[s];
     const badges = el('div', { style: 'display:flex;gap:6px' },
       el('span', { class: 'badge ' + (d.readOnly ? 'ro' : 'rw') }, d.readOnly ? 'read-only' : 'read-write'));
@@ -273,6 +298,8 @@ function render() {
         (d.hasPassword ? '' : '  ⚠ no password set')),
       d.description ? el('div', { class: 'desc' }, d.description) : null,
       el('div', { class: 'actions' },
+        el('button', { class: 'small', disabled: i === 0 ? '' : null, onclick: () => reorder('database', s, 'up') }, '▲'),
+        el('button', { class: 'small', disabled: i === dbSlugs.length - 1 ? '' : null, onclick: () => reorder('database', s, 'down') }, '▼'),
         el('button', { class: 'small', onclick: () => openDb(s) }, 'Edit'),
         el('button', { class: 'small', onclick: () => testDb(s) }, 'Test'),
         el('button', { class: 'small', onclick: () => setDefault(s) }, 'Set default'),

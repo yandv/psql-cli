@@ -24,12 +24,16 @@ export interface DatabaseEntry {
   description?: string;
   /** disable | allow | prefer | require | verify-ca | verify-full */
   sslmode?: string;
+  /** Manual sort order (ascending). Missing sorts last; tiebreak by slug. */
+  order?: number;
 }
 
 export interface ProjectEntry {
   slug: string;
   name: string;
   description?: string;
+  /** Manual sort order (ascending). Missing sorts last; tiebreak by slug. */
+  order?: number;
 }
 
 export interface Config {
@@ -114,6 +118,20 @@ export function resolveDatabase(
     return { error: `Unknown database "${slug}". Known: ${known}` };
   }
   return { db };
+}
+
+/**
+ * Canonical sort comparator for databases and projects: ascending by `order`
+ * (missing treated as +Infinity), tiebreak by slug ascending.
+ */
+export function compareByOrder(
+  a: { slug: string; order?: number },
+  b: { slug: string; order?: number },
+): number {
+  const ao = a.order ?? Number.POSITIVE_INFINITY;
+  const bo = b.order ?? Number.POSITIVE_INFINITY;
+  if (ao !== bo) return ao - bo;
+  return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
 }
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;

@@ -4,6 +4,7 @@ import {
   loadConfig,
   saveConfig,
   validateSlug,
+  compareByOrder,
   type DatabaseEntry,
   type ProjectEntry,
 } from '../config.js';
@@ -26,6 +27,7 @@ function publicEntry(d: DatabaseEntry): DatabaseEntry & { hasPassword: boolean }
     readOnly: d.readOnly,
     description: d.description,
     sslmode: d.sslmode,
+    order: d.order,
     hasPassword: hasPassword(d.slug),
   };
 }
@@ -272,6 +274,48 @@ async function route(
       );
     }
     delete config.projects[slug];
+    saveConfig(config);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  // POST /api/reorder — move a database or project up/down within its kind.
+  if (method === 'POST' && path === '/api/reorder') {
+    const body = (await readBody(req)) as Record<string, unknown>;
+    const kind = asString(body.kind);
+    const slug = asString(body.slug);
+    const dir = asString(body.dir);
+    if (kind !== 'database' && kind !== 'project') {
+      throw new Error('kind must be "database" or "project".');
+    }
+    if (!slug) throw new Error('Missing slug.');
+    if (dir !== 'up' && dir !== 'down') {
+      throw new Error('dir must be "up" or "down".');
+    }
+    const config = loadConfig();
+    const collection: Record<string, DatabaseEntry | ProjectEntry> =
+      kind === 'database' ? config.databases : config.projects;
+    if (!collection[slug]) {
+      return sendJson(res, 404, { error: `Unknown ${kind} "${slug}".` });
+    }
+    // Canonical order, then normalize: if any item lacks `order`, assign each
+    // item order = its index so swaps are well-defined.
+    const items = Object.values(collection).sort(compareByOrder);
+    if (items.some((it) => it.order === undefined)) {
+      items.forEach((it, i) => {
+        it.order = i;
+      });
+    }
+    const idx = items.findIndex((it) => it.slug === slug);
+    const neighbor = dir === 'up' ? idx - 1 : idx + 1;
+    if (neighbor < 0 || neighbor >= items.length) {
+      saveConfig(config);
+      return sendJson(res, 200, { ok: true });
+    }
+    const a = items[idx];
+    const b = items[neighbor];
+    const tmp = a.order;
+    a.order = b.order;
+    b.order = tmp;
     saveConfig(config);
     return sendJson(res, 200, { ok: true });
   }

@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { loadConfig, resolveDatabase, type Config } from '../config.js';
+import { loadConfig, resolveDatabase, compareByOrder, type Config } from '../config.js';
 import { runQuery, type OutputFormat } from '../db.js';
 
 interface QueryFlags {
@@ -75,7 +75,9 @@ export function cmdQuery(args: string[]): number {
 export function cmdList(args: string[]): number {
   const json = args.includes('--json');
   const config = loadConfig();
-  const slugs = Object.keys(config.databases).sort();
+  const slugs = Object.values(config.databases)
+    .sort(compareByOrder)
+    .map((d) => d.slug);
 
   if (json) {
     const out = slugs.map((s) => {

@@ -187,6 +187,57 @@ describe('default database', () => {
   });
 });
 
+describe('reorder databases', () => {
+  it('creates two databases, reorders, and order is reflected in state', async () => {
+    // Two fresh databases with no order yet (alphabetical: r-one before r-two).
+    const a = await api('POST', '/api/database', {
+      body: { slug: 'r-one', host: 'h', port: 5432, user: 'u', database: 'd', readOnly: true },
+    });
+    assert.equal(a.status, 200);
+    const b = await api('POST', '/api/database', {
+      body: { slug: 'r-two', host: 'h', port: 5432, user: 'u', database: 'd', readOnly: true },
+    });
+    assert.equal(b.status, 200);
+
+    // Move r-two up -> it should now sort before r-one.
+    const mv = await api('POST', '/api/reorder', {
+      body: { kind: 'database', slug: 'r-two', dir: 'up' },
+    });
+    assert.equal(mv.status, 200);
+    assert.deepEqual(await mv.json(), { ok: true });
+
+    const state = await (await api('GET', '/api/state')).json();
+    // order is preserved in /api/state.
+    assert.equal(typeof state.databases['r-one'].order, 'number');
+    assert.equal(typeof state.databases['r-two'].order, 'number');
+    assert.ok(state.databases['r-two'].order < state.databases['r-one'].order);
+  });
+
+  it('moving the top item up is a no-op (still ok)', async () => {
+    const mv = await api('POST', '/api/reorder', {
+      body: { kind: 'database', slug: 'r-two', dir: 'up' },
+    });
+    assert.equal(mv.status, 200);
+    assert.deepEqual(await mv.json(), { ok: true });
+  });
+
+  it('reorder with an unknown slug -> 404', async () => {
+    const res = await api('POST', '/api/reorder', {
+      body: { kind: 'database', slug: 'nope', dir: 'up' },
+    });
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.equal(typeof body.error, 'string');
+  });
+
+  it('reorder with a bad kind -> error', async () => {
+    const res = await api('POST', '/api/reorder', {
+      body: { kind: 'bogus', slug: 'r-one', dir: 'up' },
+    });
+    assert.notEqual(res.status, 200);
+  });
+});
+
 describe('DNS-rebinding Host header guard', () => {
   // fetch cannot override the Host header, so use node:http with an explicit one.
   function rawRequest(hostHeader) {
