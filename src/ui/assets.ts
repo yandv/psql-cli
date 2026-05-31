@@ -101,17 +101,12 @@ button:disabled:hover { border-color: var(--border); }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dash-tables .tbl:hover { background: var(--panel2); }
 .dash-tables .tbl.active { background: var(--accent); color: #fff; }
+.dash-side .nav-divider { border-top: 1px solid var(--border); margin: 0; flex: none; }
+.dash-side .sql-entry { padding: 10px 12px; cursor: pointer; font-size: 13px; flex: none;
+  color: var(--text); background: var(--panel); }
+.dash-side .sql-entry:hover { background: var(--panel2); }
+.dash-side .sql-entry.active { background: var(--accent); color: #fff; }
 .dash-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.dash-tabs { display: flex; gap: 4px; padding: 8px 12px 0; border-bottom: 1px solid var(--border);
-  flex: none; align-items: flex-end; overflow-x: auto; }
-.dash-tab { display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 14px;
-  border: 1px solid transparent; border-bottom: none; cursor: pointer;
-  border-radius: 6px 6px 0 0; color: var(--muted); background: none; white-space: nowrap; }
-.dash-tab.active { color: var(--text); background: var(--panel); border-color: var(--border); }
-.dash-tab .x { border: none; background: none; color: inherit; padding: 0 2px; font-size: 13px;
-  border-radius: 4px; line-height: 1; opacity: .6; }
-.dash-tab .x:hover { opacity: 1; background: var(--panel2); color: var(--danger); }
-.dash-tab.newtab { color: var(--accent); }
 .dash-panes { flex: 1; display: flex; min-height: 0; }
 .dash-pane { flex: 1; display: none; flex-direction: column; min-height: 0; padding: 12px; min-width: 0; }
 .dash-pane.active { display: flex; }
@@ -318,9 +313,10 @@ export const INDEX_HTML = `<!doctype html>
         <input id="dashTableSearch" placeholder="Filter tables…" />
       </div>
       <div class="dash-tables" id="dashTables"></div>
+      <div class="nav-divider"></div>
+      <div class="sql-entry" id="dashSqlEntry">⌑ SQL editor</div>
     </div>
     <div class="dash-main">
-      <div class="dash-tabs" id="dashTabs"></div>
       <div class="dash-panes" id="dashPanes"></div>
     </div>
   </div>
@@ -526,22 +522,57 @@ function renderRecent() {
 }
 
 // ---- History-API routing ----
+// Each context owns its own URL:
+//   /database/:slug                          -> dashboard open, no context
+//   /database/:slug/table/:schema/:table     -> that table context
+//   /database/:slug/query                    -> the single SQL editor context
 function navigate(path) {
   if (location.pathname !== path) history.pushState({}, '', path);
 }
-function route() {
+const enc = encodeURIComponent;
+// Ensure the dashboard is open for slug; returns true if usable. fromRoute
+// suppresses navigate() side-effects so route() never fights the address bar.
+async function ensureDash(slug, fromRoute) {
+  if (!state.databases[slug]) { toast('Unknown database "' + slug + '"', true); navigate('/'); return false; }
+  if (!dash || dash.slug !== slug || !dashBg.classList.contains('open')) {
+    await openDash(slug, true);
+  }
+  return true;
+}
+async function route() {
   const p = location.pathname || '/';
-  const m = p.match(/^\\/db\\/(.+)$/);
+  // /database/:slug/table/:schema/:table
+  let m = p.match(/^\\/database\\/([^/]+)\\/table\\/([^/]+)\\/([^/]+)\\/?$/);
   if (m) {
     const slug = decodeURIComponent(m[1]);
-    if (state.databases[slug]) { openDash(slug, true); return; }
-    toast('Unknown database "' + slug + '"', true);
-    navigate('/');
+    const schema = decodeURIComponent(m[2]);
+    const name = decodeURIComponent(m[3]);
+    if (!(await ensureDash(slug, true))) return;
+    const t = (dash.tables || []).find(x => x.schema === schema && x.name === name);
+    if (!t) { toast('Unknown table "' + schema + '.' + name + '"', true); navigate('/database/' + enc(slug)); return; }
+    openTableContext(t, true);
+    return;
+  }
+  // /database/:slug/query
+  m = p.match(/^\\/database\\/([^/]+)\\/query\\/?$/);
+  if (m) {
+    const slug = decodeURIComponent(m[1]);
+    if (!(await ensureDash(slug, true))) return;
+    openSqlContext(true);
+    return;
+  }
+  // /database/:slug (no context)
+  m = p.match(/^\\/database\\/([^/]+)\\/?$/);
+  if (m) {
+    const slug = decodeURIComponent(m[1]);
+    if (!(await ensureDash(slug, true))) return;
+    setContext(null, true);
+    return;
   }
   // Any other path -> main list view; ensure the dashboard is closed.
   if (dashBg.classList.contains('open')) closeDash(true);
 }
-window.onpopstate = route;
+window.onpopstate = () => { route(); };
 
 function render() {
   renderRecent();
@@ -803,23 +834,26 @@ document.getElementById('projCancelBtn').onclick = closeProj;
 document.getElementById('defaultSel').onchange = (e) => setDefault(e.target.value);
 [dbBg, projBg].forEach(bg => bg.addEventListener('click', e => { if (e.target === bg) bg.classList.remove('open'); }));
 
-// ---- data-browser dashboard (tabbed) ----
+// ---- data-browser dashboard (sidebar-driven, one context at a time) ----
 const dashBg = document.getElementById('dashBg');
-// dash holds the per-database session shared across tabs (the sidebar tables +
-// schema filter), plus the open tab list.
-//   dash = { slug, tables, schema, readOnly, tabs: Tab[], activeId, seq, queryNo }
-// Each Tab owns its OWN state object + DOM pane:
-//   Table tab: { id, kind:'table', schema, table:{schema,name,type}, columns,
-//                filters, orderBy, limit, offset, total, pane, els{...} }
-//   SQL tab:   { id, kind:'sql', sql, limit, offset, total, hasMore, pane, els{...} }
+// dash holds the per-database session: the sidebar tables + schema filter, plus
+// a CACHE of built contexts keyed by context-id so returning to a context
+// preserves its filters/sort/staged edits. Only the active context's pane is
+// shown; the others are display:none.
+//   dash = { slug, tables, schema, readOnly, panes: Map<ctxId, ctx>, activeId, sql:ctx|null }
+// Context ids: 'table:<schema>.<name>' and 'sql'.
+// Each context owns its OWN state object + DOM pane:
+//   Table ctx: { id, kind:'table', table:{schema,name,type}, columns, filters,
+//                orderBy, limit, offset, total, pane, els{...}, edits, ... }
+//   SQL ctx:   { id:'sql', kind:'sql', sql, limit, offset, total, pane, els{...} }
 let dash = null;
 
 const PAGE_SIZES = [25, 50, 100, 200];
 const NULL_OPS = ['is null', 'is not null'];
 const FILTER_OPS = ['=', '<>', '<', '<=', '>', '>=', 'like', 'ilike', 'is null', 'is not null'];
 
-function tabsEl() { return document.getElementById('dashTabs'); }
 function panesEl() { return document.getElementById('dashPanes'); }
+function tableCtxId(t) { return 'table:' + t.schema + '.' + t.name; }
 
 function resetDash(slug) {
   dash = {
@@ -827,10 +861,8 @@ function resetDash(slug) {
     tables: [],         // [{ schema, name, type }]
     schema: '',         // '' = all schemas (shared sidebar filter)
     readOnly: !!(state.databases[slug] && state.databases[slug].readOnly),
-    tabs: [],
-    activeId: null,
-    seq: 0,             // monotonically increasing tab id
-    queryNo: 0,         // running counter for "Query N" titles
+    panes: new Map(),   // ctxId -> context object (cached, only active shown)
+    activeId: null,     // ctxId of the visible context, or null
   };
 }
 
@@ -839,7 +871,7 @@ async function openDash(slug, fromRoute) {
   if (!d) { toast('Unknown database', true); return; }
   pushRecent(slug);
   renderRecent();
-  if (!fromRoute) navigate('/db/' + encodeURIComponent(slug));
+  if (!fromRoute) navigate('/database/' + encodeURIComponent(slug));
   resetDash(slug);
   document.getElementById('dashSlug').textContent = slug;
   const badge = document.getElementById('dashBadge');
@@ -848,9 +880,7 @@ async function openDash(slug, fromRoute) {
   document.getElementById('dashConn').textContent = d.host + ':' + d.port + '/' + d.database;
   document.getElementById('dashTableSearch').value = '';
   document.getElementById('dashSchemaSel').innerHTML = '';
-  tabsEl().innerHTML = '';
   panesEl().innerHTML = '';
-  renderTabBar();
   renderMainArea();
   dashBg.classList.add('open');
   // Skeleton list while /tables is in flight.
@@ -901,7 +931,7 @@ function renderDashTables() {
     wrap.append(el('div', { class: 'empty', style: 'padding:8px 12px' }, msg));
     return;
   }
-  const active = activeTab();
+  const active = activeCtx();
   const activeTbl = active && active.kind === 'table' ? active.table : null;
   // group by schema, preserving server order
   const order = [];
@@ -918,91 +948,58 @@ function renderDashTables() {
       wrap.append(el('div', {
         class: 'tbl' + (isActive ? ' active' : ''),
         title: t.schema + '.' + t.name,
-        onclick: () => openTableTab(t),
+        onclick: () => selectTable(t),
       }, icon + t.name));
     });
   });
+  // Highlight the SQL-editor sidebar entry when the SQL context is active.
+  const sqlEntry = document.getElementById('dashSqlEntry');
+  if (sqlEntry) sqlEntry.classList.toggle('active', !!(active && active.kind === 'sql'));
 }
 
-// ---- tab bar / activation ----
-function activeTab() {
-  if (!dash) return null;
-  return dash.tabs.find(t => t.id === dash.activeId) || null;
+// ---- context activation (one at a time, sidebar-driven) ----
+function activeCtx() {
+  if (!dash || !dash.activeId) return null;
+  return dash.panes.get(dash.activeId) || null;
 }
-function tabTitle(tab) {
-  if (tab.kind === 'sql') return 'Query ' + tab.n;
-  const t = tab.table;
-  return t.schema === 'public' ? t.name : (t.schema + '.' + t.name);
-}
-function renderTabBar() {
-  const bar = tabsEl();
-  bar.innerHTML = '';
-  dash.tabs.forEach(tab => {
-    const btn = el('div', {
-      class: 'dash-tab' + (tab.id === dash.activeId ? ' active' : ''),
-      title: tabTitle(tab),
-      onclick: () => activateTab(tab.id),
-    }, tabTitle(tab));
-    btn.append(el('button', {
-      class: 'x', title: 'Close tab',
-      onclick: (e) => { e.stopPropagation(); closeTab(tab.id); },
-    }, '✕'));
-    bar.append(btn);
-  });
-  bar.append(el('div', {
-    class: 'dash-tab newtab', title: 'New SQL tab',
-    onclick: () => openSqlTab(),
-  }, '＋ SQL'));
+// Show exactly one context (or none). Hides every other built pane and toggles
+// the empty-main state. fromRoute is accepted for symmetry (no nav here).
+function setContext(id, fromRoute) {
+  if (!dash) return;
+  dash.activeId = id;
+  dash.panes.forEach((ctx, cid) => { ctx.pane.classList.toggle('active', cid === id); });
+  renderMainArea();
+  renderDashTables();
+  const t = activeCtx();
+  if (t && t.kind === 'sql' && t.els.sql) t.els.sql.focus();
 }
 function renderMainArea() {
-  // Empty-state when no tabs are open.
+  // Empty-state when no context is selected.
   const panes = panesEl();
   const existing = panes.querySelector('.empty-main');
-  if (!dash.tabs.length) {
+  if (!dash.activeId) {
     if (!existing) {
       panes.append(el('div', { class: 'empty-main' },
-        'Pick a table on the left, or open a SQL tab.'));
+        'Pick a table on the left, or open the SQL editor.'));
     }
     return;
   }
   if (existing) existing.remove();
 }
-function activateTab(id) {
-  dash.activeId = id;
-  dash.tabs.forEach(t => { t.pane.classList.toggle('active', t.id === id); });
-  renderTabBar();
-  renderDashTables();
-  const t = activeTab();
-  if (t && t.kind === 'sql' && t.els.sql) t.els.sql.focus();
-}
-function closeTab(id) {
-  const idx = dash.tabs.findIndex(t => t.id === id);
-  if (idx === -1) return;
-  const tab = dash.tabs[idx];
-  tab.pane.remove();
-  dash.tabs.splice(idx, 1);
-  if (dash.activeId === id) {
-    const neighbor = dash.tabs[idx] || dash.tabs[idx - 1] || null;
-    dash.activeId = neighbor ? neighbor.id : null;
-    if (neighbor) neighbor.pane.classList.add('active');
-  }
-  renderTabBar();
-  renderMainArea();
-  renderDashTables();
-  const t = activeTab();
-  if (t && t.kind === 'sql' && t.els.sql) t.els.sql.focus();
-}
 
-// ---- table tabs ----
-function findTableTab(t) {
-  return dash.tabs.find(tab => tab.kind === 'table'
-    && tab.table.schema === t.schema && tab.table.name === t.name);
+// ---- table context ----
+// User clicked a table in the sidebar -> push URL, then activate.
+function selectTable(t) {
+  navigate('/database/' + enc(dash.slug) + '/table/' + enc(t.schema) + '/' + enc(t.name));
+  openTableContext(t, true);
 }
-async function openTableTab(t) {
-  const existing = findTableTab(t);
-  if (existing) { activateTab(existing.id); return; }
+// Activate a table context, building (and caching) its pane on first use so
+// returning preserves filters/sort/staged edits.
+async function openTableContext(t, fromRoute) {
+  const id = tableCtxId(t);
+  if (dash.panes.has(id)) { setContext(id, fromRoute); return; }
   const tab = {
-    id: ++dash.seq,
+    id,
     kind: 'table',
     table: t,
     columns: [],
@@ -1019,9 +1016,8 @@ async function openTableTab(t) {
     els: {},
   };
   buildTablePane(tab);
-  dash.tabs.push(tab);
-  renderMainArea();
-  activateTab(tab.id);
+  dash.panes.set(id, tab);
+  setContext(id, fromRoute);
   showGridSkeleton(tab.els.grid, 5);
   try {
     const r = await api('GET', '/db/' + encodeURIComponent(dash.slug) +
@@ -1193,13 +1189,20 @@ function sortBy(tab, col, shift) {
   loadBrowse(tab);
 }
 
-// ---- SQL tabs ----
-function openSqlTab() {
+// ---- SQL context (single) ----
+// User clicked "SQL editor" in the sidebar -> push URL, then activate.
+function selectSql() {
   if (!dash) return;
+  navigate('/database/' + enc(dash.slug) + '/query');
+  openSqlContext(true);
+}
+// Activate the single SQL context, building (and caching) it on first use.
+function openSqlContext(fromRoute) {
+  if (!dash) return;
+  if (dash.panes.has('sql')) { setContext('sql', fromRoute); return; }
   const tab = {
-    id: ++dash.seq,
+    id: 'sql',
     kind: 'sql',
-    n: ++dash.queryNo,
     sql: '',
     limit: 50,
     offset: 0,
@@ -1208,9 +1211,8 @@ function openSqlTab() {
     els: {},
   };
   buildSqlPane(tab);
-  dash.tabs.push(tab);
-  renderMainArea();
-  activateTab(tab.id);
+  dash.panes.set('sql', tab);
+  setContext('sql', fromRoute);
 }
 
 function buildSqlPane(tab) {
@@ -1516,13 +1518,14 @@ async function saveEdits(tab) {
 }
 
 document.getElementById('dashCloseBtn').onclick = () => closeDash();
+document.getElementById('dashSqlEntry').onclick = () => selectSql();
 document.getElementById('dashTableSearch').oninput = renderDashTables;
 document.getElementById('dashSchemaSel').onchange = (e) => { dash.schema = e.target.value; renderDashTables(); };
 document.addEventListener('keydown', (e) => {
   // Cmd/Ctrl+S saves staged edits in the active table tab (read-write only).
   if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')
       && dashBg.classList.contains('open')) {
-    const t = activeTab();
+    const t = activeCtx();
     if (t && t.kind === 'table' && t.edits && t.edits.size) {
       e.preventDefault();
       saveEdits(t);
