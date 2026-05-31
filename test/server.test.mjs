@@ -64,6 +64,26 @@ describe('static assets (no token)', () => {
   });
 });
 
+describe('SPA fallback (deep links, no token)', () => {
+  it('GET /db/anything returns 200 + SPA HTML', async () => {
+    const res = await fetch(`${base}/db/anything`);
+    assert.equal(res.status, 200);
+    assert.ok(res.headers.get('content-type').includes('text/html'));
+    const text = await res.text();
+    assert.ok(text.includes('psql-cli'));
+  });
+  it('GET /some/other/path returns 200 + SPA HTML', async () => {
+    const res = await fetch(`${base}/some/other/path`);
+    assert.equal(res.status, 200);
+    const text = await res.text();
+    assert.ok(text.includes('psql-cli'));
+  });
+  it('GET /api/state without token is still 403 (not the SPA)', async () => {
+    const res = await api('GET', '/api/state', { withToken: false });
+    assert.equal(res.status, 403);
+  });
+});
+
 describe('token guard on /api', () => {
   it('no token -> 403', async () => {
     const res = await api('GET', '/api/state', { withToken: false });

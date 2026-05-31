@@ -131,6 +131,27 @@ table.grid tr:hover td { background: var(--panel2); }
 .banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 10px; font-size: 13px; }
 .banner.err { background: rgba(248,81,73,.12); border: 1px solid var(--danger); color: var(--danger); }
 .hint-ro { color: var(--rw); font-size: 12px; }
+
+/* ---- skeleton shimmer ---- */
+.skeleton { position: relative; overflow: hidden; background: var(--panel2);
+  border-radius: 6px; }
+.skeleton::after { content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.08), transparent);
+  transform: translateX(-100%); animation: shimmer 1.2s infinite; }
+@keyframes shimmer { 100% { transform: translateX(100%); } }
+.skel-line { height: 14px; margin: 8px 12px; }
+.skel-cell { height: 12px; }
+table.grid td.skel-cell-wrap { padding: 6px 9px; }
+
+/* ---- recents ---- */
+.recent-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.recent-chip { padding: 5px 12px; border-radius: 999px; font-size: 12px;
+  background: var(--panel2); border: 1px solid var(--border); cursor: pointer; }
+.recent-chip:hover { border-color: var(--accent); color: var(--accent); }
+.recent-clear { margin-left: auto; }
+
+/* ---- schema filter ---- */
+.dash-side .search .schema-sel { margin-bottom: 8px; }
 `;
 
 export const INDEX_HTML = `<!doctype html>
@@ -152,6 +173,10 @@ export const INDEX_HTML = `<!doctype html>
 </header>
 <div class="wrap">
   <div class="col-main">
+    <div class="card">
+      <h2>Recent</h2>
+      <div id="recentList"></div>
+    </div>
     <div class="card">
       <h2>Databases</h2>
       <div id="projFilter" class="pillrow"></div>
@@ -240,7 +265,10 @@ export const INDEX_HTML = `<!doctype html>
   </div>
   <div class="dash-body">
     <div class="dash-side">
-      <div class="search"><input id="dashTableSearch" placeholder="Filter tables…" /></div>
+      <div class="search">
+        <select id="dashSchemaSel" class="schema-sel"></select>
+        <input id="dashTableSearch" placeholder="Filter tables…" />
+      </div>
       <div class="dash-tables" id="dashTables"></div>
     </div>
     <div class="dash-main">
@@ -293,8 +321,18 @@ export const INDEX_HTML = `<!doctype html>
 </html>`;
 
 export const APP_JS = `
-const TOKEN = new URLSearchParams(location.search).get('token') || '';
-const H = { 'Content-Type': 'application/json', 'x-psql-cli-token': TOKEN };
+const TOKEN_KEY = 'psqlcli.token';
+const RECENT_KEY = 'psqlcli.recent';
+// On startup, lift any ?token= from the URL into sessionStorage, then strip it
+// from the visible address bar so the token never lingers there.
+const URL_TOKEN = new URLSearchParams(location.search).get('token') || '';
+if (URL_TOKEN) {
+  try { sessionStorage.setItem(TOKEN_KEY, URL_TOKEN); } catch (e) {}
+  history.replaceState({}, '', location.pathname);
+}
+function getToken() {
+  try { return sessionStorage.getItem(TOKEN_KEY) || URL_TOKEN; } catch (e) { return URL_TOKEN; }
+}
 let state = { projects: {}, databases: {}, defaultDatabase: null };
 let editingSlug = null;
 let currentProjectFilter = ''; // '' = all projects
@@ -308,8 +346,13 @@ function toast(msg, kind) {
   setTimeout(() => { t.className = 'toast'; }, 2600);
 }
 async function api(method, path, body) {
-  const r = await fetch('/api' + path, { method, headers: H, body: body ? JSON.stringify(body) : undefined });
+  const headers = { 'Content-Type': 'application/json', 'x-psql-cli-token': getToken() };
+  const r = await fetch('/api' + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const data = await r.json().catch(() => ({}));
+  if (r.status === 403) {
+    toast('Session token missing/expired — reopen the URL printed by \`psql-cli ui\`.', true);
+    throw new Error('forbidden');
+  }
   if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
   return data;
 }
@@ -345,7 +388,92 @@ function el(tag, attrs, ...kids) {
   return e;
 }
 
+// ---- skeleton loaders ----
+// A skeleton list (for the tables sidebar): n shimmering lines.
+function skeletonList(n) {
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < n; i++) {
+    frag.append(el('div', { class: 'skeleton skel-line', style: 'width:' + (55 + (i * 13) % 40) + '%' }));
+  }
+  return frag;
+}
+// A skeleton grid (for Data/Query): n rows x cols shimmering cells.
+function skeletonRows(n, cols) {
+  const c = Math.max(1, cols || 5);
+  const table = el('table', { class: 'grid' });
+  const head = el('tr');
+  for (let j = 0; j < c; j++) {
+    head.append(el('th', null, el('div', { class: 'skeleton skel-cell', style: 'width:70px' })));
+  }
+  table.append(el('thead', null, head));
+  const tbody = el('tbody');
+  for (let i = 0; i < n; i++) {
+    const tr = el('tr');
+    for (let j = 0; j < c; j++) {
+      tr.append(el('td', { class: 'skel-cell-wrap' },
+        el('div', { class: 'skeleton skel-cell', style: 'width:' + (40 + (i * 7 + j * 11) % 50) + '%' })));
+    }
+    tbody.append(tr);
+  }
+  table.append(tbody);
+  return table;
+}
+function showGridSkeleton(container, cols) {
+  container.innerHTML = '';
+  container.append(skeletonRows(6, cols));
+}
+
+// ---- recently-opened sessions (localStorage) ----
+function loadRecent() {
+  try {
+    const v = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]');
+    return Array.isArray(v) ? v.filter(x => x && typeof x.slug === 'string') : [];
+  } catch (e) { return []; }
+}
+function pushRecent(slug) {
+  let list = loadRecent().filter(x => x.slug !== slug);
+  list.unshift({ slug, ts: Date.now() });
+  list = list.slice(0, 8);
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list)); } catch (e) {}
+}
+function clearRecent() {
+  try { localStorage.removeItem(RECENT_KEY); } catch (e) {}
+  renderRecent();
+}
+function renderRecent() {
+  const wrap = document.getElementById('recentList');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  const list = loadRecent().filter(x => state.databases[x.slug]);
+  if (!list.length) { wrap.append(el('div', { class: 'empty' }, 'No recently opened databases.')); return; }
+  const row = el('div', { class: 'recent-row' });
+  list.forEach(x => {
+    row.append(el('button', { class: 'recent-chip', onclick: () => openDash(x.slug) }, x.slug));
+  });
+  row.append(el('button', { class: 'small recent-clear', onclick: clearRecent }, 'clear'));
+  wrap.append(row);
+}
+
+// ---- History-API routing ----
+function navigate(path) {
+  if (location.pathname !== path) history.pushState({}, '', path);
+}
+function route() {
+  const p = location.pathname || '/';
+  const m = p.match(/^\\/db\\/(.+)$/);
+  if (m) {
+    const slug = decodeURIComponent(m[1]);
+    if (state.databases[slug]) { openDash(slug, true); return; }
+    toast('Unknown database "' + slug + '"', true);
+    navigate('/');
+  }
+  // Any other path -> main list view; ensure the dashboard is closed.
+  if (dashBg.classList.contains('open')) closeDash(true);
+}
+window.onpopstate = route;
+
 function render() {
+  renderRecent();
   // default selector
   const sel = document.getElementById('defaultSel');
   sel.innerHTML = '';
@@ -588,13 +716,17 @@ function resetDash(slug) {
     orderBy: null,      // { column, dir }
     limit: 50,
     offset: 0,
+    schema: '',         // '' = all schemas
     readOnly: !!(state.databases[slug] && state.databases[slug].readOnly),
   };
 }
 
-async function openDash(slug) {
+async function openDash(slug, fromRoute) {
   const d = state.databases[slug];
   if (!d) { toast('Unknown database', true); return; }
+  pushRecent(slug);
+  renderRecent();
+  if (!fromRoute) navigate('/db/' + encodeURIComponent(slug));
   resetDash(slug);
   document.getElementById('dashSlug').textContent = slug;
   const badge = document.getElementById('dashBadge');
@@ -602,6 +734,7 @@ async function openDash(slug) {
   badge.textContent = d.readOnly ? 'read-only' : 'read-write';
   document.getElementById('dashConn').textContent = d.host + ':' + d.port + '/' + d.database;
   document.getElementById('dashTableSearch').value = '';
+  document.getElementById('dashSchemaSel').innerHTML = '';
   document.getElementById('dashFilters').innerHTML = '';
   document.getElementById('dashGrid').innerHTML = '';
   document.getElementById('dashPageInfo').textContent = '';
@@ -614,14 +747,35 @@ async function openDash(slug) {
   document.getElementById('dashQueryHint').textContent = d.readOnly ? 'Write statements are blocked.' : '';
   dashSetTab('data');
   dashBg.classList.add('open');
+  // Skeleton list while /tables is in flight.
+  const tablesWrap = document.getElementById('dashTables');
+  tablesWrap.innerHTML = '';
+  tablesWrap.append(skeletonList(8));
   try {
     const r = await api('GET', '/db/' + encodeURIComponent(slug) + '/tables');
     dash.tables = r.tables || [];
+    populateSchemaSel();
     renderDashTables();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { tablesWrap.innerHTML = ''; toast(e.message, true); }
 }
 
-function closeDash() { dashBg.classList.remove('open'); dash = null; }
+function closeDash(fromRoute) {
+  dashBg.classList.remove('open');
+  dash = null;
+  if (!fromRoute) navigate('/');
+}
+
+// Distinct schemas present in the loaded tables, defaulting to "public" when present.
+function populateSchemaSel() {
+  const sel = document.getElementById('dashSchemaSel');
+  sel.innerHTML = '';
+  const schemas = [];
+  dash.tables.forEach(t => { if (schemas.indexOf(t.schema) === -1) schemas.push(t.schema); });
+  sel.append(el('option', { value: '' }, 'All schemas'));
+  schemas.forEach(s => sel.append(el('option', { value: s }, s)));
+  dash.schema = schemas.indexOf('public') !== -1 ? 'public' : '';
+  sel.value = dash.schema;
+}
 
 function dashSetTab(name) {
   const onData = name === 'data';
@@ -642,9 +796,20 @@ function renderDashTables() {
   const wrap = document.getElementById('dashTables');
   wrap.innerHTML = '';
   const q = document.getElementById('dashTableSearch').value.trim().toLowerCase();
+  if (!dash.tables.length) {
+    wrap.append(el('div', { class: 'empty', style: 'padding:8px 12px' }, 'No tables in this database.'));
+    return;
+  }
   let tables = dash.tables;
+  if (dash.schema) tables = tables.filter(t => t.schema === dash.schema);
   if (q) tables = tables.filter(t => t.name.toLowerCase().includes(q));
-  if (!tables.length) { wrap.append(el('div', { class: 'grid-empty' }, 'No tables.')); return; }
+  if (!tables.length) {
+    const msg = dash.schema
+      ? 'No tables in schema "' + dash.schema + '".'
+      : 'No tables match.';
+    wrap.append(el('div', { class: 'empty', style: 'padding:8px 12px' }, msg));
+    return;
+  }
   // group by schema, preserving server order
   const order = [];
   const groups = {};
@@ -675,6 +840,7 @@ async function selectTable(t) {
   dashSetTab('data');
   renderDashTables();
   document.getElementById('dashFilters').innerHTML = '';
+  showGridSkeleton(document.getElementById('dashGrid'), 5);
   try {
     const r = await api('GET', '/db/' + encodeURIComponent(dash.slug) +
       '/columns?schema=' + encodeURIComponent(t.schema) + '&table=' + encodeURIComponent(t.name));
@@ -737,18 +903,31 @@ function activeFilters() {
 
 async function loadBrowse() {
   if (!dash || !dash.table) return;
+  const filters = activeFilters();
   const body = {
     schema: dash.table.schema,
     table: dash.table.name,
-    filters: activeFilters(),
+    filters: filters,
     orderBy: dash.orderBy || undefined,
     limit: dash.limit,
     offset: dash.offset,
   };
+  const grid = document.getElementById('dashGrid');
+  showGridSkeleton(grid, dash.columns.length || 5);
   try {
     const r = await api('POST', '/db/' + encodeURIComponent(dash.slug) + '/browse', body);
-    if (!r.ok) { toast(r.error || 'Query failed', true); return; }
-    renderGrid(document.getElementById('dashGrid'), r.columns, r.rows, true);
+    if (!r.ok) { grid.innerHTML = ''; toast(r.error || 'Query failed', true); return; }
+    if (!r.rows || !r.rows.length) {
+      grid.innerHTML = '';
+      const msg = filters.length ? 'No rows (active filters).' : 'No rows.';
+      grid.append(el('div', { class: 'grid-empty' }, msg));
+      document.getElementById('dashPageInfo').textContent = 'Showing 0 of ' + r.total;
+      dash._total = r.total;
+      document.getElementById('dashPrev').disabled = dash.offset <= 0;
+      document.getElementById('dashNext').disabled = true;
+      return;
+    }
+    renderGrid(grid, r.columns, r.rows, true);
     const start = r.rows.length ? r.offset + 1 : 0;
     const end = r.offset + r.rows.length;
     document.getElementById('dashPageInfo').textContent =
@@ -756,7 +935,7 @@ async function loadBrowse() {
     dash._total = r.total;
     document.getElementById('dashPrev').disabled = dash.offset <= 0;
     document.getElementById('dashNext').disabled = end >= r.total;
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { grid.innerHTML = ''; toast(e.message, true); }
 }
 
 // Shared grid renderer. sortable=true wires column-header sorting for the Data tab.
@@ -808,9 +987,17 @@ async function runQuery() {
   const out = document.getElementById('dashQueryResults');
   if (!sql) { toast('Enter a SQL statement', true); return; }
   out.innerHTML = '';
+  const skelWrap = el('div', { class: 'grid-wrap' });
+  skelWrap.append(skeletonRows(6, 5));
+  out.append(skelWrap);
   try {
     const r = await api('POST', '/db/' + encodeURIComponent(dash.slug) + '/query', { sql });
+    out.innerHTML = '';
     if (r.ok) {
+      if (!r.rows || !r.rows.length) {
+        out.append(el('div', { class: 'empty' }, 'Query returned no rows.'));
+        return;
+      }
       out.append(el('div', { class: 'info', style: 'margin-bottom:8px' }, r.rowCount + ' rows'));
       const wrap = el('div', { class: 'grid-wrap' });
       out.append(wrap);
@@ -821,14 +1008,16 @@ async function runQuery() {
       out.append(el('div', { class: 'banner err' }, r.error || 'Query failed'));
     }
   } catch (e) {
+    out.innerHTML = '';
     out.append(el('div', { class: 'banner err' }, e.message));
   }
 }
 
-document.getElementById('dashCloseBtn').onclick = closeDash;
+document.getElementById('dashCloseBtn').onclick = () => closeDash();
 document.getElementById('dashTabData').onclick = () => dashSetTab('data');
 document.getElementById('dashTabQuery').onclick = () => dashSetTab('query');
 document.getElementById('dashTableSearch').oninput = renderDashTables;
+document.getElementById('dashSchemaSel').onchange = (e) => { dash.schema = e.target.value; renderDashTables(); };
 document.getElementById('dashAddFilter').onclick = addFilter;
 document.getElementById('dashApply').onclick = () => { dash.offset = 0; loadBrowse(); };
 document.getElementById('dashPageSize').onchange = (e) => { dash.limit = Number(e.target.value) || 50; dash.offset = 0; loadBrowse(); };
@@ -842,5 +1031,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && dashBg.classList.contains('open')) closeDash();
 });
 
-refresh().catch(e => toast(e.message, true));
+// Initial load: fetch state, then resolve the current path (so a direct
+// /db/<slug> deep link opens the dashboard).
+refresh().then(() => route()).catch(e => toast(e.message, true));
 `;

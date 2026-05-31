@@ -165,6 +165,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, token: string):
     return sendText(res, 200, 'application/javascript; charset=utf-8', APP_JS);
   }
 
+  // SPA fallback: any non-/api GET that isn't a known static asset returns the
+  // embedded INDEX_HTML (no token required) so History-API deep links such as
+  // /db/<slug> can load the SPA shell. Nothing is read from disk.
+  if (method === 'GET' && !path.startsWith('/api/')) {
+    return sendText(res, 200, 'text/html; charset=utf-8', INDEX_HTML);
+  }
+
   if (!path.startsWith('/api/')) {
     return sendJson(res, 404, { error: 'not found' });
   }
