@@ -8,7 +8,8 @@ import {
   type ProjectEntry,
 } from '../config.js';
 import { setPassword, deletePassword, hasPassword } from '../keychain.js';
-import { testConnection } from '../db.js';
+import { testConnection, listServerDatabases } from '../db.js';
+import { parseConnectionInput } from '../connparse.js';
 import { INDEX_HTML, STYLES_CSS, APP_JS } from './assets.js';
 
 const MAX_BODY = 1024 * 1024; // 1MB
@@ -273,6 +274,38 @@ async function route(
     delete config.projects[slug];
     saveConfig(config);
     return sendJson(res, 200, { ok: true });
+  }
+
+  // POST /api/parse — parse a pasted connection blob into structured fields.
+  // Nothing is persisted; any password the user pasted is echoed back into
+  // their own form only.
+  if (method === 'POST' && path === '/api/parse') {
+    const body = (await readBody(req)) as Record<string, unknown>;
+    const input = asString(body.input) ?? '';
+    return sendJson(res, 200, parseConnectionInput(input));
+  }
+
+  // POST /api/list-databases — connect to a server and list its databases.
+  // Nothing is persisted and the password is never stored.
+  if (method === 'POST' && path === '/api/list-databases') {
+    const body = (await readBody(req)) as Record<string, unknown>;
+    const host = asString(body.host)?.trim();
+    const user = asString(body.user)?.trim();
+    if (!host || !user) {
+      throw new Error('host and user are required.');
+    }
+    const password = asString(body.password) ?? '';
+    const result = listServerDatabases(
+      {
+        host,
+        port: typeof body.port === 'number' ? body.port : Number(body.port) || 5432,
+        user,
+        sslmode: asString(body.sslmode) || undefined,
+        database: asString(body.database) || undefined,
+      },
+      password,
+    );
+    return sendJson(res, 200, result);
   }
 
   // POST /api/test

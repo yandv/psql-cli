@@ -57,10 +57,14 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px
 .switch { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
   background: var(--panel2); border: 1px solid var(--border); padding: 10px 16px; border-radius: 8px;
-  opacity: 0; transition: opacity .2s; pointer-events: none; }
+  opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 1000; }
 .toast.show { opacity: 1; }
 .toast.err { border-color: var(--danger); color: var(--danger); }
+.toast.ok { border-color: var(--ro); color: var(--ro); }
 .empty { color: var(--muted); padding: 8px 0; }
+.pillrow { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.pill { padding: 4px 12px; border-radius: 999px; font-size: 12px; }
+.pill.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 `;
 
 export const INDEX_HTML = `<!doctype html>
@@ -91,6 +95,7 @@ export const INDEX_HTML = `<!doctype html>
     <div class="col-main">
       <div class="card">
         <h2>Databases</h2>
+        <div id="projFilter" class="pillrow"></div>
         <div id="dbList"></div>
       </div>
     </div>
@@ -101,6 +106,9 @@ export const INDEX_HTML = `<!doctype html>
   <div class="modal">
     <h3 id="dbModalTitle">Add database</h3>
     <p class="hint">The password is stored in the macOS Keychain — never in the config file and never shown to an LLM.</p>
+    <label for="f_paste">Paste a connection (optional)</label>
+    <textarea id="f_paste" rows="3" placeholder="Paste a connection: postgres://… , jdbc:postgresql://… , host=… , JSON, or host / port / user / password on separate lines"></textarea>
+    <div style="margin-top:6px"><button id="dbParseBtn" class="small">Parse &amp; fill</button></div>
     <label>Slug (LLM-facing id, lowercase-kebab)</label>
     <input id="f_slug" placeholder="analytics-prod" />
     <div class="grid2">
@@ -109,7 +117,12 @@ export const INDEX_HTML = `<!doctype html>
     </div>
     <div class="grid2">
       <div><label>User</label><input id="f_user" /></div>
-      <div><label>Database name</label><input id="f_database" /></div>
+      <div>
+        <label>Database name</label>
+        <input id="f_database" list="dblist" />
+        <datalist id="dblist"></datalist>
+        <div style="margin-top:6px"><button id="dbListBtn" class="small">List databases</button></div>
+      </div>
     </div>
     <label>Password <span id="pwState" class="hint"></span></label>
     <input id="f_password" type="password" placeholder="•••••••" autocomplete="new-password" />
@@ -168,10 +181,14 @@ const TOKEN = new URLSearchParams(location.search).get('token') || '';
 const H = { 'Content-Type': 'application/json', 'x-psql-cli-token': TOKEN };
 let state = { projects: {}, databases: {}, defaultDatabase: null };
 let editingSlug = null;
+let currentProjectFilter = ''; // '' = all projects
 
-function toast(msg, isErr) {
+function toast(msg, kind) {
+  // kind: 'ok' (green) | 'err'/true (red) | undefined (neutral)
   const t = document.getElementById('toast');
-  t.textContent = msg; t.className = 'toast show' + (isErr ? ' err' : '');
+  t.textContent = msg;
+  const cls = (kind === true || kind === 'err') ? ' err' : (kind === 'ok' ? ' ok' : '');
+  t.className = 'toast show' + cls;
   setTimeout(() => { t.className = 'toast'; }, 2600);
 }
 async function api(method, path, body) {
@@ -216,15 +233,35 @@ function render() {
       el('div', { class: 'name' }, p.name),
       el('div', { class: 'meta' }, s + ' · ' + count + ' db'),
       el('div', { style: 'margin-top:6px;display:flex;gap:6px' },
+        el('button', { class: 'small primary', onclick: () => { currentProjectFilter = s; openDb(null); } }, '+ DB'),
         el('button', { class: 'small', onclick: () => openProj(s) }, 'Edit'),
         el('button', { class: 'small danger', onclick: () => delProj(s) }, 'Delete'))));
   });
 
+  // project filter (pill row): "All projects" first + pre-selected.
+  const pf = document.getElementById('projFilter');
+  pf.innerHTML = '';
+  const mkPill = (value, label) => {
+    const active = currentProjectFilter === value;
+    return el('button', {
+      class: 'small pill' + (active ? ' active' : ''),
+      onclick: () => { currentProjectFilter = value; render(); },
+    }, label);
+  };
+  pf.append(mkPill('', 'All projects'));
+  projSlugs.forEach(s => pf.append(mkPill(s, state.projects[s].name)));
+  // If the filtered project was deleted, fall back to "All".
+  if (currentProjectFilter && !state.projects[currentProjectFilter]) currentProjectFilter = '';
+
   // databases
   const dl = document.getElementById('dbList');
   dl.innerHTML = '';
-  const dbSlugs = Object.keys(state.databases).sort();
-  if (!dbSlugs.length) dl.append(el('div', { class: 'empty' }, 'No databases yet. Click "+ Database".'));
+  let dbSlugs = Object.keys(state.databases).sort();
+  if (currentProjectFilter) {
+    dbSlugs = dbSlugs.filter(s => state.databases[s].project === currentProjectFilter);
+  }
+  if (!dbSlugs.length) dl.append(el('div', { class: 'empty' },
+    currentProjectFilter ? 'No databases in this project.' : 'No databases yet. Click "+ Database".'));
   dbSlugs.forEach(s => {
     const d = state.databases[s];
     const badges = el('div', { style: 'display:flex;gap:6px' },
@@ -265,10 +302,13 @@ function openDb(slug) {
   document.getElementById('f_database').value = d ? d.database : '';
   document.getElementById('f_password').value = '';
   document.getElementById('pwState').textContent = d ? (d.hasPassword ? '(leave blank to keep current)' : '(none set)') : '';
-  document.getElementById('f_project').value = d ? (d.project || '') : '';
+  // When adding while a project filter is active, pre-select that project.
+  document.getElementById('f_project').value = d ? (d.project || '') : currentProjectFilter;
   document.getElementById('f_sslmode').value = d ? (d.sslmode || '') : '';
   document.getElementById('f_desc').value = d ? (d.description || '') : '';
   document.getElementById('f_readonly').checked = d ? d.readOnly : true;
+  document.getElementById('f_paste').value = '';
+  document.getElementById('dblist').innerHTML = '';
   dbBg.classList.add('open');
 }
 function closeDb() { dbBg.classList.remove('open'); }
@@ -289,21 +329,63 @@ function dbFormBody() {
   return body;
 }
 async function saveDb() {
-  try { await api('POST', '/database', dbFormBody()); closeDb(); await refresh(); toast('Saved'); }
+  try { await api('POST', '/database', dbFormBody()); closeDb(); await refresh(); toast('Saved', 'ok'); }
   catch (e) { toast(e.message, true); }
 }
 async function testDb(slug) {
-  try { const r = await api('POST', '/test', slug ? { slug } : dbFormBody()); toast(r.message, !r.ok); }
+  try { const r = await api('POST', '/test', slug ? { slug } : dbFormBody()); toast(r.message, r.ok ? 'ok' : 'err'); }
   catch (e) { toast(e.message, true); }
 }
 async function delDb(slug) {
   if (!confirm('Delete "' + slug + '" and its stored password?')) return;
-  try { await api('DELETE', '/database/' + encodeURIComponent(slug)); await refresh(); toast('Deleted'); }
+  try { await api('DELETE', '/database/' + encodeURIComponent(slug)); await refresh(); toast('Deleted', 'ok'); }
   catch (e) { toast(e.message, true); }
 }
 async function setDefault(slug) {
-  try { await api('POST', '/default', { slug }); await refresh(); toast('Default: ' + slug); }
+  try { await api('POST', '/default', { slug }); await refresh(); toast('Default: ' + slug, 'ok'); }
   catch (e) { toast(e.message, true); }
+}
+
+// ---- paste-to-fill ----
+async function parseFill() {
+  const input = document.getElementById('f_paste').value;
+  if (!input.trim()) { toast('Paste a connection first', true); return; }
+  try {
+    const p = await api('POST', '/parse', { input });
+    if (p.host) document.getElementById('f_host').value = p.host;
+    if (p.port) document.getElementById('f_port').value = p.port;
+    if (p.user) document.getElementById('f_user').value = p.user;
+    if (p.database) document.getElementById('f_database').value = p.database;
+    if (p.password) document.getElementById('f_password').value = p.password;
+    if (p.sslmode) document.getElementById('f_sslmode').value = p.sslmode;
+    if (p.warnings && p.warnings.length) toast(p.warnings.join('; '), true);
+    document.getElementById('f_paste').value = '';
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---- database picker ----
+async function listDatabases() {
+  const body = {
+    host: document.getElementById('f_host').value.trim(),
+    port: Number(document.getElementById('f_port').value) || 5432,
+    user: document.getElementById('f_user').value.trim(),
+    sslmode: document.getElementById('f_sslmode').value || undefined,
+  };
+  const pw = document.getElementById('f_password').value;
+  if (pw) body.password = pw;
+  try {
+    const r = await api('POST', '/list-databases', body);
+    if (r.ok) {
+      const dlist = document.getElementById('dblist');
+      dlist.innerHTML = '';
+      (r.databases || []).forEach(name => dlist.append(el('option', { value: name })));
+      const dbInput = document.getElementById('f_database');
+      if (!dbInput.value) dbInput.focus();
+      toast((r.databases ? r.databases.length : 0) + ' databases found — pick one', 'ok');
+    } else {
+      toast(r.error || 'Could not list databases.', true);
+    }
+  } catch (e) { toast(e.message, true); }
 }
 
 // ---- project modal ----
@@ -327,12 +409,12 @@ async function saveProj() {
       name: document.getElementById('p_name').value.trim(),
       description: document.getElementById('p_desc').value.trim() || undefined,
     });
-    closeProj(); await refresh(); toast('Saved');
+    closeProj(); await refresh(); toast('Saved', 'ok');
   } catch (e) { toast(e.message, true); }
 }
 async function delProj(slug) {
   if (!confirm('Delete project "' + slug + '"?')) return;
-  try { await api('DELETE', '/project/' + encodeURIComponent(slug)); await refresh(); toast('Deleted'); }
+  try { await api('DELETE', '/project/' + encodeURIComponent(slug)); await refresh(); toast('Deleted', 'ok'); }
   catch (e) { toast(e.message, true); }
 }
 
@@ -341,6 +423,8 @@ document.getElementById('addProjBtn').onclick = () => openProj(null);
 document.getElementById('dbSaveBtn').onclick = saveDb;
 document.getElementById('dbCancelBtn').onclick = closeDb;
 document.getElementById('dbTestBtn').onclick = () => testDb(null);
+document.getElementById('dbParseBtn').onclick = parseFill;
+document.getElementById('dbListBtn').onclick = listDatabases;
 document.getElementById('projSaveBtn').onclick = saveProj;
 document.getElementById('projCancelBtn').onclick = closeProj;
 document.getElementById('defaultSel').onchange = (e) => setDefault(e.target.value);

@@ -9,7 +9,8 @@ import {
   type ProjectEntry,
 } from '../config.js';
 import { setPassword, deletePassword, hasPassword } from '../keychain.js';
-import { testConnection } from '../db.js';
+import { testConnection, listServerDatabases } from '../db.js';
+import { parseConnectionInput } from '../connparse.js';
 
 interface Flags {
   [k: string]: string | boolean;
@@ -76,6 +77,42 @@ function promptPassword(label: string): Promise<string> {
   });
 }
 
+/** Read all of stdin to a string (used for `--from -`). */
+function readStdin(): Promise<string> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    process.stdin.on('data', (c: Buffer) => chunks.push(c));
+    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    process.stdin.resume();
+  });
+}
+
+/** Read a single line from stdin (echoed). Resolves '' on EOF. */
+function promptLine(label: string): Promise<string> {
+  return new Promise((resolve) => {
+    process.stdout.write(label);
+    const stdin = process.stdin;
+    let buf = '';
+    const onData = (chunk: Buffer): void => {
+      buf += chunk.toString('utf8');
+      const nl = buf.indexOf('\n');
+      if (nl !== -1) {
+        stdin.pause();
+        stdin.removeListener('data', onData);
+        stdin.removeListener('end', onEnd);
+        resolve(buf.slice(0, nl).trim());
+      }
+    };
+    const onEnd = (): void => {
+      stdin.removeListener('data', onData);
+      resolve(buf.trim());
+    };
+    stdin.resume();
+    stdin.on('data', onData);
+    stdin.on('end', onEnd);
+  });
+}
+
 export function cmdDefault(args: string[]): number {
   const config = loadConfig();
   const slug = args[0];
@@ -112,10 +149,37 @@ export async function cmdDb(args: string[]): Promise<number> {
   }
 }
 
+/** Slugify a string into a valid kebab-case slug (or '' if nothing usable). */
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 63)
+    .replace(/^-+/, '');
+}
+
 async function dbAddOrEdit(args: string[], isEdit: boolean): Promise<number> {
   const { positionals, flags } = parseFlags(args);
   const config = loadConfig();
-  const slug = (flags.slug as string) ?? positionals[0];
+
+  // --from <blob> | --from -  : parse a pasted connection as the BASE values.
+  let parsed: ReturnType<typeof parseConnectionInput> | null = null;
+  if (flags.from !== undefined) {
+    let blob: string;
+    if (flags.from === '-' || flags.from === true) {
+      blob = await readStdin();
+    } else {
+      blob = flags.from as string;
+    }
+    parsed = parseConnectionInput(blob);
+    for (const w of parsed.warnings) console.error(`  note: ${w}`);
+  }
+
+  const slug =
+    (flags.slug as string) ??
+    positionals[0] ??
+    (parsed?.database ? slugify(parsed.database) : '');
   if (!slug) {
     console.error(
       'Missing --slug. Example:\n  psql-cli db add --slug my-db --host H --user U --database D [--port 5432] [--readonly] [--project P] [--desc "..."]',
@@ -157,19 +221,23 @@ async function dbAddOrEdit(args: string[], isEdit: boolean): Promise<number> {
   const entry: DatabaseEntry = {
     ...base,
     slug,
-    host: (flags.host as string) ?? base.host,
-    port: flags.port ? Number(flags.port) : base.port,
-    user: (flags.user as string) ?? base.user,
-    database: (flags.database as string) ?? (flags.db as string) ?? base.database,
+    host: (flags.host as string) ?? parsed?.host ?? base.host,
+    port: flags.port ? Number(flags.port) : (parsed?.port ?? base.port),
+    user: (flags.user as string) ?? parsed?.user ?? base.user,
+    database:
+      (flags.database as string) ??
+      (flags.db as string) ??
+      parsed?.database ??
+      base.database,
     project: (flags.project as string) ?? base.project,
     description:
       (flags.desc as string) ?? (flags.description as string) ?? base.description,
-    sslmode: (flags.sslmode as string) ?? base.sslmode,
+    sslmode: (flags.sslmode as string) ?? parsed?.sslmode ?? base.sslmode,
     readOnly,
   };
 
-  if (!entry.host || !entry.user || !entry.database) {
-    console.error('host, user and database are required.');
+  if (!entry.host || !entry.user) {
+    console.error('host and user are required.');
     return 2;
   }
 
@@ -180,16 +248,57 @@ async function dbAddOrEdit(args: string[], isEdit: boolean): Promise<number> {
     return 2;
   }
 
-  // Password: flag (discouraged), env, or hidden prompt. On edit, blank keeps existing.
+  // Password precedence: --password > parsed > env > interactive prompt.
+  // Resolve early so we can use it for listing databases when needed.
   let password: string | undefined;
   if (typeof flags.password === 'string') {
     password = flags.password;
+  } else if (parsed?.password) {
+    password = parsed.password;
   } else if (process.env.PSQL_CLI_PASSWORD) {
     password = process.env.PSQL_CLI_PASSWORD;
   } else if (!isEdit || flags['set-password']) {
     password = await promptPassword(
       `Password for ${entry.user}@${entry.host} (leave blank to keep): `,
     );
+  }
+
+  // No database yet (only when using --from): offer a numbered picker from the
+  // live server. Without --from we keep the original "required" error below.
+  if (!entry.database && parsed) {
+    const listing = listServerDatabases(
+      { host: entry.host, port: entry.port, user: entry.user, sslmode: entry.sslmode },
+      password ?? '',
+    );
+    if (!listing.ok) {
+      console.error(
+        `Could not list databases: ${listing.error}\nPass --database <name>.`,
+      );
+      return 2;
+    }
+    const names = listing.databases ?? [];
+    if (names.length === 0) {
+      console.error('No databases found on the server. Pass --database <name>.');
+      return 2;
+    }
+    if (!process.stdin.isTTY) {
+      console.error('No database selected; pass --database <name>.');
+      return 2;
+    }
+    console.log('Databases on the server:');
+    names.forEach((n, i) => console.log(`  ${i + 1}. ${n}`));
+    const answer = await promptLine(`Pick a database [1-${names.length}]: `);
+    const idx = Number(answer);
+    if (!answer || !Number.isInteger(idx) || idx < 1 || idx > names.length) {
+      console.error('No database selected; pass --database <name>.');
+      return 2;
+    }
+    entry.database = names[idx - 1];
+  }
+
+  if (!entry.database) {
+    console.error('host, user and database are required.');
+    return 2;
   }
 
   config.databases[slug] = entry;

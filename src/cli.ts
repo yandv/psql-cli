@@ -13,6 +13,7 @@ import {
   cmdImportLegacy,
 } from './commands/manage.js';
 import { cmdUi } from './commands/ui.js';
+import { cmdImportDbeaver } from './commands/dbeaver.js';
 
 const HELP = `psql-cli — query your PostgreSQL databases by slug (credentials stay in the Keychain)
 
@@ -31,6 +32,7 @@ Manage:
   psql-cli project list|add|edit|rm ...       manage projects
   psql-cli test <slug>                        test a connection
   psql-cli import-legacy [path]               import connections from ~/.pgpass
+  psql-cli import-dbeaver [--replace] [--dry-run]   import connections from DBeaver (with passwords)
 
 Read-only databases reject every write statement (enforced both by a SQL guard and by a server-side read-only transaction).`;
 
@@ -73,6 +75,8 @@ async function main(): Promise<number> {
       return cmdUi(rest);
     case 'import-legacy':
       return cmdImportLegacy(rest);
+    case 'import-dbeaver':
+      return cmdImportDbeaver(rest);
     case 'help':
     case '--help':
     case '-h':
