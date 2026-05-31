@@ -14,6 +14,19 @@ const SERVICE = 'psql-cli';
 
 export class KeychainError extends Error {}
 
+/**
+ * In-process cache of the boolean "does this slug have a stored password?".
+ * Each `hasPassword` call otherwise spawns the `security` binary, which is slow
+ * when /api/state checks every database. We cache ONLY the boolean — never the
+ * password value, which stays uncached via getPassword.
+ */
+const presenceCache = new Map<string, boolean>();
+
+/** Clear the in-process hasPassword cache (used by tests). */
+export function clearPasswordCache(): void {
+  presenceCache.clear();
+}
+
 function assertMac(): void {
   if (process.platform !== 'darwin') {
     throw new KeychainError(
@@ -35,6 +48,7 @@ export function setPassword(slug: string, password: string): void {
       `Failed to store password in Keychain: ${res.stderr?.trim() || res.error?.message || 'unknown error'}`,
     );
   }
+  presenceCache.set(slug, true);
 }
 
 export function getPassword(slug: string): string | undefined {
@@ -50,7 +64,11 @@ export function getPassword(slug: string): string | undefined {
 }
 
 export function hasPassword(slug: string): boolean {
-  return getPassword(slug) !== undefined;
+  const cached = presenceCache.get(slug);
+  if (cached !== undefined) return cached;
+  const present = getPassword(slug) !== undefined;
+  presenceCache.set(slug, present);
+  return present;
 }
 
 export function deletePassword(slug: string): void {
@@ -58,4 +76,5 @@ export function deletePassword(slug: string): void {
   spawnSync('security', ['delete-generic-password', '-s', SERVICE, '-a', slug], {
     encoding: 'utf8',
   });
+  presenceCache.set(slug, false);
 }

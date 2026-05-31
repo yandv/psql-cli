@@ -29,6 +29,12 @@ header .spacer { flex: 1; }
 .db .conn { color: var(--muted); font-size: 12px; margin-top: 4px; font-family: ui-monospace, monospace; }
 .db .desc { color: var(--muted); font-size: 12px; margin-top: 4px; }
 .db .actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+.db.dragging { opacity: .45; }
+.db.drop-before { box-shadow: 0 -3px 0 0 var(--accent); }
+.db.drop-after { box-shadow: 0 3px 0 0 var(--accent); }
+.db .drag-handle { cursor: grab; color: var(--muted); font-size: 15px; user-select: none;
+  padding: 0 2px; }
+.db .drag-handle:active { cursor: grabbing; }
 .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
 .badge.ro { background: rgba(63,185,80,.15); color: var(--ro); }
 .badge.rw { background: rgba(240,136,62,.15); color: var(--rw); }
@@ -97,12 +103,21 @@ button:disabled:hover { border-color: var(--border); }
 .dash-tables .tbl.active { background: var(--accent); color: #fff; }
 .dash-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .dash-tabs { display: flex; gap: 4px; padding: 8px 12px 0; border-bottom: 1px solid var(--border);
-  flex: none; }
-.dash-tab { padding: 6px 14px; border: 1px solid transparent; border-bottom: none; cursor: pointer;
-  border-radius: 6px 6px 0 0; color: var(--muted); background: none; }
+  flex: none; align-items: flex-end; overflow-x: auto; }
+.dash-tab { display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 14px;
+  border: 1px solid transparent; border-bottom: none; cursor: pointer;
+  border-radius: 6px 6px 0 0; color: var(--muted); background: none; white-space: nowrap; }
 .dash-tab.active { color: var(--text); background: var(--panel); border-color: var(--border); }
-.dash-pane { flex: 1; display: none; flex-direction: column; min-height: 0; padding: 12px; }
+.dash-tab .x { border: none; background: none; color: inherit; padding: 0 2px; font-size: 13px;
+  border-radius: 4px; line-height: 1; opacity: .6; }
+.dash-tab .x:hover { opacity: 1; background: var(--panel2); color: var(--danger); }
+.dash-tab.newtab { color: var(--accent); }
+.dash-panes { flex: 1; display: flex; min-height: 0; }
+.dash-pane { flex: 1; display: none; flex-direction: column; min-height: 0; padding: 12px; min-width: 0; }
 .dash-pane.active { display: flex; }
+.dash-main .empty-main { flex: 1; display: flex; align-items: center; justify-content: center;
+  color: var(--muted); padding: 24px; }
+.query-pane { display: flex; flex-direction: column; min-height: 0; flex: 1; }
 .filters-bar { display: flex; flex-direction: column; gap: 6px; flex: none; margin-bottom: 10px; }
 .filter-row { display: flex; gap: 6px; align-items: center; }
 .filter-row select, .filter-row input { width: auto; flex: 1; min-width: 0; }
@@ -272,45 +287,8 @@ export const INDEX_HTML = `<!doctype html>
       <div class="dash-tables" id="dashTables"></div>
     </div>
     <div class="dash-main">
-      <div class="dash-tabs">
-        <button class="dash-tab active" id="dashTabData">Data</button>
-        <button class="dash-tab" id="dashTabQuery">Query</button>
-      </div>
-      <div class="dash-pane active" id="dashPaneData">
-        <div class="filters-bar">
-          <div id="dashFilters"></div>
-          <div class="filters-actions">
-            <button class="small" id="dashAddFilter">+ filter</button>
-            <button class="small primary" id="dashApply">Apply</button>
-          </div>
-        </div>
-        <div class="grid-wrap" id="dashGrid"></div>
-        <div class="dash-foot">
-          <span class="info" id="dashPageInfo"></span>
-          <div class="spacer"></div>
-          <label style="margin:0">rows</label>
-          <select id="dashPageSize">
-            <option value="25">25</option>
-            <option value="50" selected>50</option>
-            <option value="100">100</option>
-            <option value="200">200</option>
-          </select>
-          <button class="small" id="dashPrev">Prev</button>
-          <button class="small" id="dashNext">Next</button>
-        </div>
-      </div>
-      <div class="dash-pane" id="dashPaneQuery">
-        <div class="query-editor">
-          <div class="toolbar">
-            <button class="primary small" id="dashRun">Run</button>
-            <span class="badge" id="dashQueryBadge"></span>
-            <span class="hint-ro" id="dashQueryHint"></span>
-            <span class="info">Cmd/Ctrl+Enter to run</span>
-          </div>
-          <textarea id="dashSql" placeholder="SELECT * FROM …"></textarea>
-        </div>
-        <div class="query-results" id="dashQueryResults"></div>
-      </div>
+      <div class="dash-tabs" id="dashTabs"></div>
+      <div class="dash-panes" id="dashPanes"></div>
     </div>
   </div>
 </div>
@@ -323,6 +301,7 @@ export const INDEX_HTML = `<!doctype html>
 export const APP_JS = `
 const TOKEN_KEY = 'psqlcli.token';
 const RECENT_KEY = 'psqlcli.recent';
+const LAST_PROJECT_KEY = 'psqlcli.lastProject';
 // On startup, lift any ?token= from the URL into sessionStorage, then strip it
 // from the visible address bar so the token never lingers there.
 const URL_TOKEN = new URLSearchParams(location.search).get('token') || '';
@@ -336,6 +315,18 @@ function getToken() {
 let state = { projects: {}, databases: {}, defaultDatabase: null };
 let editingSlug = null;
 let currentProjectFilter = ''; // '' = all projects
+
+// Persist the selected project filter so reopening the UI restores it.
+function loadLastProject() {
+  try { return localStorage.getItem(LAST_PROJECT_KEY) || ''; } catch (e) { return ''; }
+}
+function setProjectFilter(value) {
+  currentProjectFilter = value;
+  try {
+    if (value) localStorage.setItem(LAST_PROJECT_KEY, value);
+    else localStorage.removeItem(LAST_PROJECT_KEY);
+  } catch (e) {}
+}
 
 function toast(msg, kind) {
   // kind: 'ok' (green) | 'err'/true (red) | undefined (neutral)
@@ -373,6 +364,33 @@ async function reorder(kind, slug, dir) {
     await api('POST', '/reorder', { kind, slug, dir });
     await refresh();
   } catch (e) { toast(e.message, true); }
+}
+
+// Drag-and-drop database reorder: optimistically rewrite local order across the
+// FULL set of databases (so the persisted index is global, not view-local),
+// re-render immediately, then persist in the background.
+function moveDatabase(fromSlug, toSlug, after) {
+  if (fromSlug === toSlug) return;
+  const all = orderedSlugs(state.databases);
+  const from = all.indexOf(fromSlug);
+  if (from === -1) return;
+  all.splice(from, 1);
+  let to = all.indexOf(toSlug);
+  if (to === -1) return;
+  if (after) to += 1;
+  all.splice(to, 0, fromSlug);
+  // Rewrite local order indices and re-render immediately (optimistic).
+  all.forEach((s, i) => { state.databases[s].order = i; });
+  render();
+  persistOrder(all);
+}
+async function persistOrder(orderedList) {
+  try {
+    await api('POST', '/order', { databases: orderedList });
+  } catch (e) {
+    toast('Could not save order: ' + e.message, true);
+    refresh();
+  }
 }
 
 function el(tag, attrs, ...kids) {
@@ -487,7 +505,7 @@ function render() {
   // canonical project order
   const projSlugs = orderedSlugs(state.projects);
   // If the filtered project was deleted, fall back to "All".
-  if (currentProjectFilter && !state.projects[currentProjectFilter]) currentProjectFilter = '';
+  if (currentProjectFilter && !state.projects[currentProjectFilter]) setProjectFilter('');
 
   // project filter (pill row): "All projects" first + pre-selected.
   const pf = document.getElementById('projFilter');
@@ -496,7 +514,7 @@ function render() {
     const active = currentProjectFilter === value;
     return el('button', {
       class: 'small pill' + (active ? ' active' : ''),
-      onclick: () => { currentProjectFilter = value; render(); },
+      onclick: () => { setProjectFilter(value); render(); },
     }, label);
   };
   pf.append(mkPill('', 'All projects'));
@@ -531,24 +549,54 @@ function render() {
   }
   if (!dbSlugs.length) dl.append(el('div', { class: 'empty' },
     currentProjectFilter ? 'No databases in this project.' : 'No databases yet. Click "+ Database".'));
-  dbSlugs.forEach((s, i) => {
+  dbSlugs.forEach((s) => {
     const d = state.databases[s];
     const badges = el('div', { style: 'display:flex;gap:6px' },
       el('span', { class: 'badge ' + (d.readOnly ? 'ro' : 'rw') }, d.readOnly ? 'read-only' : 'read-write'));
     if (s === state.defaultDatabase) badges.append(el('span', { class: 'badge def' }, 'default'));
-    dl.append(el('div', { class: 'db' },
-      el('div', { class: 'top' }, el('span', { class: 'slug clickable', title: 'Browse data', onclick: () => openDash(s) }, s), badges),
+    const card = el('div', { class: 'db', draggable: 'true' },
+      el('div', { class: 'top' },
+        el('span', { class: 'drag-handle', title: 'Drag to reorder' }, '⠿'),
+        el('span', { class: 'slug clickable', title: 'Browse data', onclick: () => openDash(s) }, s), badges),
       el('div', { class: 'conn' }, d.user + '@' + d.host + ':' + d.port + '/' + d.database +
         (d.hasPassword ? '' : '  ⚠ no password set')),
       d.description ? el('div', { class: 'desc' }, d.description) : null,
       el('div', { class: 'actions' },
-        el('button', { class: 'small', disabled: i === 0 ? '' : null, onclick: () => reorder('database', s, 'up') }, '▲'),
-        el('button', { class: 'small', disabled: i === dbSlugs.length - 1 ? '' : null, onclick: () => reorder('database', s, 'down') }, '▼'),
         el('button', { class: 'small primary', onclick: () => openDash(s) }, 'Browse'),
         el('button', { class: 'small', onclick: () => openDb(s) }, 'Edit'),
         el('button', { class: 'small', onclick: () => testDb(s) }, 'Test'),
         el('button', { class: 'small', onclick: () => setDefault(s) }, 'Set default'),
-        el('button', { class: 'small danger', onclick: () => delDb(s) }, 'Delete'))));
+        el('button', { class: 'small danger', onclick: () => delDb(s) }, 'Delete')));
+    card.dataset.slug = s;
+    card.addEventListener('dragstart', (e) => {
+      card.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', s); } catch (err) {}
+    });
+    card.addEventListener('dragend', () => {
+      card.classList.remove('dragging');
+      dl.querySelectorAll('.db').forEach(c => c.classList.remove('drop-before', 'drop-after'));
+    });
+    card.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const rect = card.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      card.classList.toggle('drop-after', after);
+      card.classList.toggle('drop-before', !after);
+    });
+    card.addEventListener('dragleave', () => {
+      card.classList.remove('drop-before', 'drop-after');
+    });
+    card.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const from = (() => { try { return e.dataTransfer.getData('text/plain'); } catch (err) { return ''; } })();
+      const rect = card.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      card.classList.remove('drop-before', 'drop-after');
+      if (from) moveDatabase(from, s, after);
+    });
+    dl.append(card);
   });
 
   // project dropdown in db modal
@@ -702,22 +750,34 @@ document.getElementById('projCancelBtn').onclick = closeProj;
 document.getElementById('defaultSel').onchange = (e) => setDefault(e.target.value);
 [dbBg, projBg].forEach(bg => bg.addEventListener('click', e => { if (e.target === bg) bg.classList.remove('open'); }));
 
-// ---- data-browser dashboard ----
+// ---- data-browser dashboard (tabbed) ----
 const dashBg = document.getElementById('dashBg');
-let dash = null; // { slug, tables, table, columns, filters, orderBy, limit, offset, readOnly }
+// dash holds the per-database session shared across tabs (the sidebar tables +
+// schema filter), plus the open tab list.
+//   dash = { slug, tables, schema, readOnly, tabs: Tab[], activeId, seq, queryNo }
+// Each Tab owns its OWN state object + DOM pane:
+//   Table tab: { id, kind:'table', schema, table:{schema,name,type}, columns,
+//                filters, orderBy, limit, offset, total, pane, els{...} }
+//   SQL tab:   { id, kind:'sql', sql, limit, offset, total, hasMore, pane, els{...} }
+let dash = null;
+
+const PAGE_SIZES = [25, 50, 100, 200];
+const NULL_OPS = ['is null', 'is not null'];
+const FILTER_OPS = ['=', '<>', '<', '<=', '>', '>=', 'like', 'ilike', 'is null', 'is not null'];
+
+function tabsEl() { return document.getElementById('dashTabs'); }
+function panesEl() { return document.getElementById('dashPanes'); }
 
 function resetDash(slug) {
   dash = {
     slug,
-    tables: [],
-    table: null,        // { schema, name, type }
-    columns: [],        // string[] column names for the selected table
-    filters: [],        // [{ column, op, value }]
-    orderBy: null,      // { column, dir }
-    limit: 50,
-    offset: 0,
-    schema: '',         // '' = all schemas
+    tables: [],         // [{ schema, name, type }]
+    schema: '',         // '' = all schemas (shared sidebar filter)
     readOnly: !!(state.databases[slug] && state.databases[slug].readOnly),
+    tabs: [],
+    activeId: null,
+    seq: 0,             // monotonically increasing tab id
+    queryNo: 0,         // running counter for "Query N" titles
   };
 }
 
@@ -735,17 +795,10 @@ async function openDash(slug, fromRoute) {
   document.getElementById('dashConn').textContent = d.host + ':' + d.port + '/' + d.database;
   document.getElementById('dashTableSearch').value = '';
   document.getElementById('dashSchemaSel').innerHTML = '';
-  document.getElementById('dashFilters').innerHTML = '';
-  document.getElementById('dashGrid').innerHTML = '';
-  document.getElementById('dashPageInfo').textContent = '';
-  document.getElementById('dashPageSize').value = '50';
-  document.getElementById('dashSql').value = '';
-  document.getElementById('dashQueryResults').innerHTML = '';
-  const qBadge = document.getElementById('dashQueryBadge');
-  qBadge.className = 'badge ' + (d.readOnly ? 'ro' : 'rw');
-  qBadge.textContent = d.readOnly ? 'read-only' : 'read-write';
-  document.getElementById('dashQueryHint').textContent = d.readOnly ? 'Write statements are blocked.' : '';
-  dashSetTab('data');
+  tabsEl().innerHTML = '';
+  panesEl().innerHTML = '';
+  renderTabBar();
+  renderMainArea();
   dashBg.classList.add('open');
   // Skeleton list while /tables is in flight.
   const tablesWrap = document.getElementById('dashTables');
@@ -777,21 +830,6 @@ function populateSchemaSel() {
   sel.value = dash.schema;
 }
 
-function dashSetTab(name) {
-  const onData = name === 'data';
-  document.getElementById('dashTabData').classList.toggle('active', onData);
-  document.getElementById('dashTabQuery').classList.toggle('active', !onData);
-  document.getElementById('dashPaneData').classList.toggle('active', onData);
-  document.getElementById('dashPaneQuery').classList.toggle('active', !onData);
-  // Nice-to-have: prefill query editor when switching to an empty Query tab.
-  if (!onData && dash && dash.table) {
-    const ta = document.getElementById('dashSql');
-    if (!ta.value.trim()) {
-      ta.value = 'SELECT * FROM "' + dash.table.schema + '"."' + dash.table.name + '" LIMIT 50';
-    }
-  }
-}
-
 function renderDashTables() {
   const wrap = document.getElementById('dashTables');
   wrap.innerHTML = '';
@@ -810,6 +848,8 @@ function renderDashTables() {
     wrap.append(el('div', { class: 'empty', style: 'padding:8px 12px' }, msg));
     return;
   }
+  const active = activeTab();
+  const activeTbl = active && active.kind === 'table' ? active.table : null;
   // group by schema, preserving server order
   const order = [];
   const groups = {};
@@ -820,49 +860,163 @@ function renderDashTables() {
   order.forEach(schema => {
     wrap.append(el('div', { class: 'schema' }, schema));
     groups[schema].forEach(t => {
-      const active = dash.table && dash.table.schema === t.schema && dash.table.name === t.name;
+      const isActive = activeTbl && activeTbl.schema === t.schema && activeTbl.name === t.name;
       const icon = t.type === 'view' ? '👁 ' : '📄 ';
       wrap.append(el('div', {
-        class: 'tbl' + (active ? ' active' : ''),
+        class: 'tbl' + (isActive ? ' active' : ''),
         title: t.schema + '.' + t.name,
-        onclick: () => selectTable(t),
+        onclick: () => openTableTab(t),
       }, icon + t.name));
     });
   });
 }
 
-async function selectTable(t) {
-  dash.table = t;
-  dash.filters = [];
-  dash.orderBy = null;
-  dash.offset = 0;
-  dash.columns = [];
-  dashSetTab('data');
+// ---- tab bar / activation ----
+function activeTab() {
+  if (!dash) return null;
+  return dash.tabs.find(t => t.id === dash.activeId) || null;
+}
+function tabTitle(tab) {
+  if (tab.kind === 'sql') return 'Query ' + tab.n;
+  const t = tab.table;
+  return t.schema === 'public' ? t.name : (t.schema + '.' + t.name);
+}
+function renderTabBar() {
+  const bar = tabsEl();
+  bar.innerHTML = '';
+  dash.tabs.forEach(tab => {
+    const btn = el('div', {
+      class: 'dash-tab' + (tab.id === dash.activeId ? ' active' : ''),
+      title: tabTitle(tab),
+      onclick: () => activateTab(tab.id),
+    }, tabTitle(tab));
+    btn.append(el('button', {
+      class: 'x', title: 'Close tab',
+      onclick: (e) => { e.stopPropagation(); closeTab(tab.id); },
+    }, '✕'));
+    bar.append(btn);
+  });
+  bar.append(el('div', {
+    class: 'dash-tab newtab', title: 'New SQL tab',
+    onclick: () => openSqlTab(),
+  }, '＋ SQL'));
+}
+function renderMainArea() {
+  // Empty-state when no tabs are open.
+  const panes = panesEl();
+  const existing = panes.querySelector('.empty-main');
+  if (!dash.tabs.length) {
+    if (!existing) {
+      panes.append(el('div', { class: 'empty-main' },
+        'Pick a table on the left, or open a SQL tab.'));
+    }
+    return;
+  }
+  if (existing) existing.remove();
+}
+function activateTab(id) {
+  dash.activeId = id;
+  dash.tabs.forEach(t => { t.pane.classList.toggle('active', t.id === id); });
+  renderTabBar();
   renderDashTables();
-  document.getElementById('dashFilters').innerHTML = '';
-  showGridSkeleton(document.getElementById('dashGrid'), 5);
+  const t = activeTab();
+  if (t && t.kind === 'sql' && t.els.sql) t.els.sql.focus();
+}
+function closeTab(id) {
+  const idx = dash.tabs.findIndex(t => t.id === id);
+  if (idx === -1) return;
+  const tab = dash.tabs[idx];
+  tab.pane.remove();
+  dash.tabs.splice(idx, 1);
+  if (dash.activeId === id) {
+    const neighbor = dash.tabs[idx] || dash.tabs[idx - 1] || null;
+    dash.activeId = neighbor ? neighbor.id : null;
+    if (neighbor) neighbor.pane.classList.add('active');
+  }
+  renderTabBar();
+  renderMainArea();
+  renderDashTables();
+  const t = activeTab();
+  if (t && t.kind === 'sql' && t.els.sql) t.els.sql.focus();
+}
+
+// ---- table tabs ----
+function findTableTab(t) {
+  return dash.tabs.find(tab => tab.kind === 'table'
+    && tab.table.schema === t.schema && tab.table.name === t.name);
+}
+async function openTableTab(t) {
+  const existing = findTableTab(t);
+  if (existing) { activateTab(existing.id); return; }
+  const tab = {
+    id: ++dash.seq,
+    kind: 'table',
+    table: t,
+    columns: [],
+    filters: [],
+    orderBy: null,
+    limit: 50,
+    offset: 0,
+    total: null,
+    els: {},
+  };
+  buildTablePane(tab);
+  dash.tabs.push(tab);
+  renderMainArea();
+  activateTab(tab.id);
+  showGridSkeleton(tab.els.grid, 5);
   try {
     const r = await api('GET', '/db/' + encodeURIComponent(dash.slug) +
       '/columns?schema=' + encodeURIComponent(t.schema) + '&table=' + encodeURIComponent(t.name));
-    dash.columns = (r.columns || []).map(c => c.name);
+    tab.columns = (r.columns || []).map(c => c.name);
   } catch (e) { toast(e.message, true); }
-  await loadBrowse();
+  await loadBrowse(tab);
 }
 
-const NULL_OPS = ['is null', 'is not null'];
-const FILTER_OPS = ['=', '<>', '<', '<=', '>', '>=', 'like', 'ilike', 'is null', 'is not null'];
+function buildTablePane(tab) {
+  const filters = el('div');
+  const grid = el('div', { class: 'grid-wrap' });
+  const pageInfo = el('span', { class: 'info' });
+  const pageSize = el('select', null,
+    ...PAGE_SIZES.map(n => {
+      const o = el('option', { value: String(n) }, String(n));
+      if (n === tab.limit) o.selected = true;
+      return o;
+    }));
+  pageSize.onchange = (e) => { tab.limit = Number(e.target.value) || 50; tab.offset = 0; loadBrowse(tab); };
+  const prev = el('button', { class: 'small' }, 'Prev');
+  const next = el('button', { class: 'small' }, 'Next');
+  prev.onclick = () => { tab.offset = Math.max(0, tab.offset - tab.limit); loadBrowse(tab); };
+  next.onclick = () => { tab.offset = tab.offset + tab.limit; loadBrowse(tab); };
+  const pane = el('div', { class: 'dash-pane' },
+    el('div', { class: 'filters-bar' },
+      filters,
+      el('div', { class: 'filters-actions' },
+        el('button', { class: 'small', onclick: () => addFilter(tab) }, '+ filter'),
+        el('button', { class: 'small primary', onclick: () => { tab.offset = 0; loadBrowse(tab); } }, 'Apply'))),
+    grid,
+    el('div', { class: 'dash-foot' },
+      pageInfo,
+      el('div', { class: 'spacer' }),
+      el('label', { style: 'margin:0' }, 'rows'),
+      pageSize, prev, next));
+  tab.pane = pane;
+  tab.els = { filters, grid, pageInfo, prev, next };
+  panesEl().append(pane);
+  renderFilters(tab);
+}
 
-function renderFilters() {
-  const wrap = document.getElementById('dashFilters');
+function renderFilters(tab) {
+  const wrap = tab.els.filters;
   wrap.innerHTML = '';
-  dash.filters.forEach((f, idx) => {
+  tab.filters.forEach((f, idx) => {
     const colSel = el('select', { onchange: e => { f.column = e.target.value; } });
-    dash.columns.forEach(c => {
+    tab.columns.forEach(c => {
       const o = el('option', { value: c }, c);
       if (c === f.column) o.selected = true;
       colSel.append(o);
     });
-    if (!f.column && dash.columns.length) f.column = dash.columns[0];
+    if (!f.column && tab.columns.length) f.column = tab.columns[0];
     const valInput = el('input', {
       value: f.value || '',
       placeholder: 'value',
@@ -883,64 +1037,194 @@ function renderFilters() {
     valInput.disabled = NULL_OPS.includes(f.op);
     wrap.append(el('div', { class: 'filter-row' },
       colSel, opSel, valInput,
-      el('button', { class: 'small', title: 'Remove', onclick: () => { dash.filters.splice(idx, 1); renderFilters(); } }, '✕')));
+      el('button', { class: 'small', title: 'Remove', onclick: () => { tab.filters.splice(idx, 1); renderFilters(tab); } }, '✕')));
   });
 }
 
-function addFilter() {
-  if (!dash.columns.length) { toast('Select a table first', true); return; }
-  dash.filters.push({ column: dash.columns[0], op: '=', value: '' });
-  renderFilters();
+function addFilter(tab) {
+  if (!tab.columns.length) { toast('Columns still loading', true); return; }
+  tab.filters.push({ column: tab.columns[0], op: '=', value: '' });
+  renderFilters(tab);
 }
 
-function activeFilters() {
-  return dash.filters
+function activeFilters(tab) {
+  return tab.filters
     .filter(f => f.column && f.op)
     .map(f => NULL_OPS.includes(f.op)
       ? { column: f.column, op: f.op }
       : { column: f.column, op: f.op, value: f.value || '' });
 }
 
-async function loadBrowse() {
-  if (!dash || !dash.table) return;
-  const filters = activeFilters();
+async function loadBrowse(tab) {
+  if (!dash || !tab || tab.kind !== 'table') return;
+  const filters = activeFilters(tab);
   const body = {
-    schema: dash.table.schema,
-    table: dash.table.name,
+    schema: tab.table.schema,
+    table: tab.table.name,
     filters: filters,
-    orderBy: dash.orderBy || undefined,
-    limit: dash.limit,
-    offset: dash.offset,
+    orderBy: tab.orderBy || undefined,
+    limit: tab.limit,
+    offset: tab.offset,
   };
-  const grid = document.getElementById('dashGrid');
-  showGridSkeleton(grid, dash.columns.length || 5);
+  const grid = tab.els.grid;
+  showGridSkeleton(grid, tab.columns.length || 5);
   try {
     const r = await api('POST', '/db/' + encodeURIComponent(dash.slug) + '/browse', body);
     if (!r.ok) { grid.innerHTML = ''; toast(r.error || 'Query failed', true); return; }
+    tab.total = r.total;
     if (!r.rows || !r.rows.length) {
       grid.innerHTML = '';
       const msg = filters.length ? 'No rows (active filters).' : 'No rows.';
       grid.append(el('div', { class: 'grid-empty' }, msg));
-      document.getElementById('dashPageInfo').textContent = 'Showing 0 of ' + r.total;
-      dash._total = r.total;
-      document.getElementById('dashPrev').disabled = dash.offset <= 0;
-      document.getElementById('dashNext').disabled = true;
+      tab.els.pageInfo.textContent = 'Showing 0 of ' + r.total;
+      tab.els.prev.disabled = tab.offset <= 0;
+      tab.els.next.disabled = true;
       return;
     }
-    renderGrid(grid, r.columns, r.rows, true);
-    const start = r.rows.length ? r.offset + 1 : 0;
+    renderGrid(grid, r.columns, r.rows, { tab });
+    const start = r.offset + 1;
     const end = r.offset + r.rows.length;
-    document.getElementById('dashPageInfo').textContent =
-      'Showing ' + start + '–' + end + ' of ' + r.total;
-    dash._total = r.total;
-    document.getElementById('dashPrev').disabled = dash.offset <= 0;
-    document.getElementById('dashNext').disabled = end >= r.total;
+    tab.els.pageInfo.textContent = 'Showing ' + start + '–' + end + ' of ' + r.total;
+    tab.els.prev.disabled = tab.offset <= 0;
+    tab.els.next.disabled = end >= r.total;
   } catch (e) { grid.innerHTML = ''; toast(e.message, true); }
 }
 
-// Shared grid renderer. sortable=true wires column-header sorting for the Data tab.
-function renderGrid(container, columns, rows, sortable) {
+function sortBy(tab, col) {
+  if (tab.orderBy && tab.orderBy.column === col) {
+    tab.orderBy.dir = tab.orderBy.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    tab.orderBy = { column: col, dir: 'asc' };
+  }
+  tab.offset = 0;
+  loadBrowse(tab);
+}
+
+// ---- SQL tabs ----
+function openSqlTab() {
+  if (!dash) return;
+  const tab = {
+    id: ++dash.seq,
+    kind: 'sql',
+    n: ++dash.queryNo,
+    sql: '',
+    limit: 50,
+    offset: 0,
+    total: null,
+    hasMore: false,
+    els: {},
+  };
+  buildSqlPane(tab);
+  dash.tabs.push(tab);
+  renderMainArea();
+  activateTab(tab.id);
+}
+
+function buildSqlPane(tab) {
+  const ro = dash.readOnly;
+  const badge = el('span', { class: 'badge ' + (ro ? 'ro' : 'rw') }, ro ? 'read-only' : 'read-write');
+  const sql = el('textarea', { placeholder: 'SELECT * FROM …' });
+  sql.value = tab.sql;
+  sql.addEventListener('input', () => { tab.sql = sql.value; });
+  sql.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); tab.offset = 0; runQuery(tab); }
+  });
+  const results = el('div', { class: 'query-results' });
+  const pageInfo = el('span', { class: 'info' });
+  const pageSize = el('select', null,
+    ...PAGE_SIZES.map(n => {
+      const o = el('option', { value: String(n) }, String(n));
+      if (n === tab.limit) o.selected = true;
+      return o;
+    }));
+  pageSize.onchange = (e) => { tab.limit = Number(e.target.value) || 50; tab.offset = 0; runQuery(tab); };
+  const prev = el('button', { class: 'small' }, 'Prev');
+  const next = el('button', { class: 'small' }, 'Next');
+  prev.onclick = () => { tab.offset = Math.max(0, tab.offset - tab.limit); runQuery(tab); };
+  next.onclick = () => { tab.offset = tab.offset + tab.limit; runQuery(tab); };
+  prev.disabled = true; next.disabled = true;
+  const foot = el('div', { class: 'dash-foot' },
+    pageInfo, el('div', { class: 'spacer' }),
+    el('label', { style: 'margin:0' }, 'rows'),
+    pageSize, prev, next);
+  foot.style.display = 'none';
+  const pane = el('div', { class: 'dash-pane query-pane' },
+    el('div', { class: 'query-editor' },
+      el('div', { class: 'toolbar' },
+        el('button', { class: 'primary small', onclick: () => { tab.offset = 0; runQuery(tab); } }, 'Run'),
+        badge,
+        el('span', { class: 'hint-ro' }, ro ? 'writes are blocked on this database' : ''),
+        el('span', { class: 'info' }, 'Cmd/Ctrl+Enter to run')),
+      sql),
+    results, foot);
+  tab.pane = pane;
+  tab.els = { sql, results, pageInfo, prev, next, foot };
+  panesEl().append(pane);
+}
+
+async function runQuery(tab) {
+  if (!dash || !tab || tab.kind !== 'sql') return;
+  const sql = tab.els.sql.value.trim();
+  const out = tab.els.results;
+  if (!sql) { toast('Enter a SQL statement', true); return; }
+  out.innerHTML = '';
+  const skelWrap = el('div', { class: 'grid-wrap' });
+  skelWrap.append(skeletonRows(6, 5));
+  out.append(skelWrap);
+  try {
+    const r = await api('POST', '/db/' + encodeURIComponent(dash.slug) + '/query',
+      { sql, limit: tab.limit, offset: tab.offset });
+    out.innerHTML = '';
+    if (r.ok) {
+      if (!r.rows || !r.rows.length) {
+        out.append(el('div', { class: 'empty' }, 'Query returned no rows.'));
+        updateSqlFoot(tab, r, 0);
+        return;
+      }
+      const wrap = el('div', { class: 'grid-wrap' });
+      out.append(wrap);
+      renderGrid(wrap, r.columns, r.rows, null);
+      updateSqlFoot(tab, r, r.rows.length);
+    } else if (r.blocked) {
+      out.append(el('div', { class: 'banner err' }, 'Blocked: ' + (r.error || 'read-only database')));
+      hideSqlFoot(tab);
+    } else {
+      out.append(el('div', { class: 'banner err' }, r.error || 'Query failed'));
+      hideSqlFoot(tab);
+    }
+  } catch (e) {
+    out.innerHTML = '';
+    out.append(el('div', { class: 'banner err' }, e.message));
+    hideSqlFoot(tab);
+  }
+}
+
+// Show pagination only when the server ran the query paginated (echoed a limit).
+function updateSqlFoot(tab, r, shown) {
+  const paged = typeof r.limit === 'number';
+  if (!paged) { hideSqlFoot(tab); return; }
+  tab.els.foot.style.display = 'flex';
+  const offset = typeof r.offset === 'number' ? r.offset : tab.offset;
+  const start = shown ? offset + 1 : 0;
+  const end = offset + shown;
+  if (typeof r.total === 'number') {
+    tab.els.pageInfo.textContent = 'Showing ' + start + '–' + end + ' of ' + r.total;
+    tab.els.next.disabled = end >= r.total;
+  } else {
+    tab.els.pageInfo.textContent = shown ? ('Showing ' + start + '–' + end) : 'No more rows';
+    // No total: assume more rows only if we filled the page.
+    tab.els.next.disabled = shown < tab.limit;
+  }
+  tab.els.prev.disabled = offset <= 0;
+}
+function hideSqlFoot(tab) { tab.els.foot.style.display = 'none'; }
+
+// Shared grid renderer. Pass { tab } to wire sortable Data-tab headers; pass a
+// falsy 4th arg for a plain (non-sortable) grid. Cells carry data-row / data-col
+// attributes so a later task can attach per-cell editing.
+function renderGrid(container, columns, rows, opts) {
   container.innerHTML = '';
+  const tab = opts && opts.tab ? opts.tab : null;
   if (!columns || !columns.length) {
     container.append(el('div', { class: 'grid-empty' }, 'No columns.'));
     return;
@@ -949,20 +1233,26 @@ function renderGrid(container, columns, rows, sortable) {
   const headRow = el('tr');
   columns.forEach(col => {
     let label = col;
-    if (sortable && dash && dash.orderBy && dash.orderBy.column === col) {
-      label = col + (dash.orderBy.dir === 'asc' ? ' ▲' : ' ▼');
+    if (tab && tab.orderBy && tab.orderBy.column === col) {
+      label = col + (tab.orderBy.dir === 'asc' ? ' ▲' : ' ▼');
     }
-    const th = el('th', sortable ? { onclick: () => sortBy(col), title: 'Sort' } : { title: col }, label);
+    const th = el('th', tab ? { onclick: () => sortBy(tab, col), title: 'Sort' } : { title: col }, label);
     headRow.append(th);
   });
   table.append(el('thead', null, headRow));
   const tbody = el('tbody');
-  (rows || []).forEach(row => {
+  (rows || []).forEach((row, ri) => {
     const tr = el('tr');
     columns.forEach((c, ci) => {
       const v = row[ci];
       const isNull = v === null || v === undefined || v === '';
-      tr.append(el('td', { class: isNull ? 'null' : null, title: isNull ? '' : String(v) }, isNull ? '∅' : String(v)));
+      const td = el('td', {
+        class: isNull ? 'null' : null,
+        title: isNull ? '' : String(v),
+        'data-row': String(ri),
+        'data-col': c,
+      }, isNull ? '∅' : String(v));
+      tr.append(td);
     });
     tbody.append(tr);
   });
@@ -971,67 +1261,23 @@ function renderGrid(container, columns, rows, sortable) {
   container.append(table);
 }
 
-function sortBy(col) {
-  if (dash.orderBy && dash.orderBy.column === col) {
-    dash.orderBy.dir = dash.orderBy.dir === 'asc' ? 'desc' : 'asc';
-  } else {
-    dash.orderBy = { column: col, dir: 'asc' };
-  }
-  dash.offset = 0;
-  loadBrowse();
-}
-
-async function runQuery() {
-  if (!dash) return;
-  const sql = document.getElementById('dashSql').value.trim();
-  const out = document.getElementById('dashQueryResults');
-  if (!sql) { toast('Enter a SQL statement', true); return; }
-  out.innerHTML = '';
-  const skelWrap = el('div', { class: 'grid-wrap' });
-  skelWrap.append(skeletonRows(6, 5));
-  out.append(skelWrap);
-  try {
-    const r = await api('POST', '/db/' + encodeURIComponent(dash.slug) + '/query', { sql });
-    out.innerHTML = '';
-    if (r.ok) {
-      if (!r.rows || !r.rows.length) {
-        out.append(el('div', { class: 'empty' }, 'Query returned no rows.'));
-        return;
-      }
-      out.append(el('div', { class: 'info', style: 'margin-bottom:8px' }, r.rowCount + ' rows'));
-      const wrap = el('div', { class: 'grid-wrap' });
-      out.append(wrap);
-      renderGrid(wrap, r.columns, r.rows, false);
-    } else if (r.blocked) {
-      out.append(el('div', { class: 'banner err' }, 'Blocked: ' + (r.error || 'read-only database')));
-    } else {
-      out.append(el('div', { class: 'banner err' }, r.error || 'Query failed'));
-    }
-  } catch (e) {
-    out.innerHTML = '';
-    out.append(el('div', { class: 'banner err' }, e.message));
-  }
-}
-
 document.getElementById('dashCloseBtn').onclick = () => closeDash();
-document.getElementById('dashTabData').onclick = () => dashSetTab('data');
-document.getElementById('dashTabQuery').onclick = () => dashSetTab('query');
 document.getElementById('dashTableSearch').oninput = renderDashTables;
 document.getElementById('dashSchemaSel').onchange = (e) => { dash.schema = e.target.value; renderDashTables(); };
-document.getElementById('dashAddFilter').onclick = addFilter;
-document.getElementById('dashApply').onclick = () => { dash.offset = 0; loadBrowse(); };
-document.getElementById('dashPageSize').onchange = (e) => { dash.limit = Number(e.target.value) || 50; dash.offset = 0; loadBrowse(); };
-document.getElementById('dashPrev').onclick = () => { dash.offset = Math.max(0, dash.offset - dash.limit); loadBrowse(); };
-document.getElementById('dashNext').onclick = () => { dash.offset = dash.offset + dash.limit; loadBrowse(); };
-document.getElementById('dashRun').onclick = runQuery;
-document.getElementById('dashSql').addEventListener('keydown', (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); runQuery(); }
-});
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && dashBg.classList.contains('open')) closeDash();
 });
 
-// Initial load: fetch state, then resolve the current path (so a direct
+// Initial load: fetch state, restore the last-selected project filter (only if
+// it still exists), render, then resolve the current path (so a direct
 // /db/<slug> deep link opens the dashboard).
-refresh().then(() => route()).catch(e => toast(e.message, true));
+(async () => {
+  try {
+    state = await api('GET', '/state');
+    const last = loadLastProject();
+    currentProjectFilter = (last && state.projects[last]) ? last : '';
+    render();
+    route();
+  } catch (e) { toast(e.message, true); }
+})();
 `;

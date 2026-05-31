@@ -12,7 +12,13 @@ import { setPassword, deletePassword, hasPassword } from '../keychain.js';
 import { testConnection, listServerDatabases, runQuery } from '../db.js';
 import { parseConnectionInput } from '../connparse.js';
 import { parseCsv } from '../csv.js';
-import { buildBrowseSql, buildCountSql, type BrowseFilter } from '../browsesql.js';
+import {
+  buildBrowseSql,
+  buildCountSql,
+  quoteIdent,
+  sqlLiteral as sqlLit,
+  type BrowseFilter,
+} from '../browsesql.js';
 import { INDEX_HTML, STYLES_CSS, APP_JS } from './assets.js';
 
 const MAX_BODY = 1024 * 1024; // 1MB
@@ -329,6 +335,29 @@ async function route(
     return sendJson(res, 200, { ok: true });
   }
 
+  // POST /api/order — bulk set order from drag-and-drop reorder. Body:
+  // { databases?: string[], projects?: string[] }. For each array, the slug at
+  // index i (if it exists in config) gets .order = i. Unknown slugs ignored.
+  if (method === 'POST' && path === '/api/order') {
+    const body = (await readBody(req)) as Record<string, unknown>;
+    const config = loadConfig();
+    const apply = (
+      slugs: unknown,
+      collection: Record<string, { order?: number }>,
+    ): void => {
+      if (!Array.isArray(slugs)) return;
+      slugs.forEach((slug, i) => {
+        if (typeof slug === 'string' && collection[slug]) {
+          collection[slug].order = i;
+        }
+      });
+    };
+    apply(body.databases, config.databases);
+    apply(body.projects, config.projects);
+    saveConfig(config);
+    return sendJson(res, 200, { ok: true });
+  }
+
   // POST /api/parse — parse a pasted connection blob into structured fields.
   // Nothing is persisted; any password the user pasted is echoed back into
   // their own form only.
@@ -556,6 +585,53 @@ async function routeBrowse(
     }
     const body = (await readBody(req)) as Record<string, unknown>;
     const sql = asString(body.sql) ?? '';
+    const wantLimit = typeof body.limit === 'number' ? body.limit : undefined;
+
+    // Pagination only applies when a positive limit is requested AND the SQL is
+    // a single plain SELECT/WITH statement. Otherwise run verbatim.
+    const paginate = wantLimit !== undefined && wantLimit > 0 && isPlainSelect(sql);
+
+    if (paginate) {
+      const limit = clampLimit(wantLimit);
+      const offset = normalizeOffset(typeof body.offset === 'number' ? body.offset : 0);
+      const inner = sql.trim().replace(/;\s*$/, '');
+      const rowsSql = `SELECT * FROM ( ${inner} ) _q LIMIT ${limit} OFFSET ${offset}`;
+      const result = runQuery(r.db, rowsSql, { format: 'csv' });
+      if (result.blocked) {
+        sendJson(res, 200, {
+          ok: false,
+          blocked: true,
+          error: result.stderr,
+          readOnly: r.db.readOnly,
+        });
+        return true;
+      }
+      if (!result.ok) {
+        sendJson(res, 200, { ok: false, error: result.stderr, readOnly: r.db.readOnly });
+        return true;
+      }
+      const { columns, rows } = parseCsv(result.stdout);
+      // total is best-effort: omit it if the count query errors.
+      let total: number | undefined;
+      const countRes = runQuery(r.db, `SELECT count(*) AS count FROM ( ${inner} ) _q`, {
+        format: 'csv',
+      });
+      if (countRes.ok) {
+        total = Number(parseCsv(countRes.stdout).rows[0]?.[0] ?? 0) || 0;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        columns,
+        rows,
+        rowCount: rows.length,
+        ...(total !== undefined ? { total } : {}),
+        limit,
+        offset,
+        readOnly: r.db.readOnly,
+      });
+      return true;
+    }
+
     const result = runQuery(r.db, sql, { format: 'csv' });
     if (result.blocked) {
       sendJson(res, 200, {
@@ -581,7 +657,125 @@ async function routeBrowse(
     return true;
   }
 
+  // GET /api/db/:slug/pk?schema=<>&table=<>
+  if (method === 'GET' && path.endsWith('/pk')) {
+    const r = resolveDbRoute(res, path);
+    if (!r || r.sub !== 'pk') {
+      if (r) sendJson(res, 404, { ok: false, error: 'not found' });
+      return true;
+    }
+    const url = new URL(req.url ?? '/', `http://127.0.0.1:${boundPort}`);
+    const schema = url.searchParams.get('schema') ?? '';
+    const table = url.searchParams.get('table') ?? '';
+    // Build a regclass literal: '"schema"."table"' with internal double-quotes
+    // doubled, then single-quote-escape the whole thing for the SQL literal.
+    const regclass = `"${schema.replace(/"/g, '""')}"."${table.replace(/"/g, '""')}"`;
+    const sql =
+      'SELECT a.attname AS col FROM pg_index i ' +
+      'JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) ' +
+      `WHERE i.indrelid = ${sqlLit(regclass)}::regclass AND i.indisprimary ` +
+      'ORDER BY array_position(i.indkey, a.attnum)';
+    const result = runQuery(r.db, sql, { format: 'csv' });
+    if (!result.ok) {
+      sendJson(res, 200, { ok: false, error: result.stderr });
+      return true;
+    }
+    const { rows } = parseCsv(result.stdout);
+    sendJson(res, 200, { ok: true, pk: rows.map((row) => row[0]) });
+    return true;
+  }
+
+  // POST /api/db/:slug/apply — apply staged update/delete changes transactionally.
+  if (method === 'POST' && path.endsWith('/apply')) {
+    const r = resolveDbRoute(res, path);
+    if (!r || r.sub !== 'apply') {
+      if (r) sendJson(res, 404, { ok: false, error: 'not found' });
+      return true;
+    }
+    if (r.db.readOnly !== false) {
+      sendJson(res, 200, {
+        ok: false,
+        error: 'Database is read-only; mark it read-write to edit.',
+      });
+      return true;
+    }
+    const body = (await readBody(req)) as Record<string, unknown>;
+    const changes = Array.isArray(body.changes) ? (body.changes as ApplyChange[]) : [];
+    let sql: string;
+    try {
+      sql = buildApplySql(changes);
+    } catch (err) {
+      sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+      return true;
+    }
+    const res2 = runQuery(r.db, sql, { format: 'csv' });
+    sendJson(res, 200, {
+      ok: res2.ok,
+      applied: changes.length,
+      error: res2.ok ? undefined : res2.stderr,
+    });
+    return true;
+  }
+
   return false;
+}
+
+/** True when `sql` is a single statement starting with SELECT or WITH. */
+function isPlainSelect(sql: string): boolean {
+  const trimmed = sql.trim();
+  if (!/^(select|with)\b/i.test(trimmed)) return false;
+  // A `;` followed by more non-whitespace means multiple statements.
+  const semi = trimmed.indexOf(';');
+  if (semi !== -1 && trimmed.slice(semi + 1).trim().length > 0) return false;
+  return true;
+}
+
+type ApplyChange =
+  | {
+      type: 'update';
+      schema: string;
+      table: string;
+      key: Record<string, string | null>;
+      set: Record<string, string | null>;
+    }
+  | {
+      type: 'delete';
+      schema: string;
+      table: string;
+      key: Record<string, string | null>;
+    };
+
+/** Build a `WHERE k1 = v1 AND k2 IS NULL ...` clause from a key map. */
+function buildKeyWhere(key: Record<string, string | null>): string {
+  const cols = Object.keys(key);
+  if (cols.length === 0) throw new Error('Each change must include a non-empty key.');
+  return cols
+    .map((col) => {
+      const v = key[col];
+      return v === null ? `${quoteIdent(col)} IS NULL` : `${quoteIdent(col)} = ${sqlLit(v)}`;
+    })
+    .join(' AND ');
+}
+
+/** Build a BEGIN/COMMIT-wrapped statement list for the staged changes. */
+function buildApplySql(changes: ApplyChange[]): string {
+  const stmts = changes.map((c) => {
+    const ref = `${quoteIdent(c.schema)}.${quoteIdent(c.table)}`;
+    if (c.type === 'update') {
+      const where = buildKeyWhere(c.key);
+      const setCols = Object.keys(c.set);
+      const set = setCols
+        .map((col) => `${quoteIdent(col)} = ${sqlLit(c.set[col])}`)
+        .join(', ');
+      return `UPDATE ${ref} SET ${set} WHERE ${where};`;
+    }
+    if (c.type === 'delete') {
+      const where = buildKeyWhere(c.key);
+      return `DELETE FROM ${ref} WHERE ${where};`;
+    }
+    throw new Error(`Unsupported change type.`);
+  });
+  return `BEGIN;\n${stmts.join('\n')}\nCOMMIT;`;
 }
 
 /** limit clamped to 1..500 (default 50); mirrors browsesql for the response echo. */

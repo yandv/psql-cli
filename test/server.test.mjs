@@ -258,6 +258,102 @@ describe('reorder databases', () => {
   });
 });
 
+describe('bulk order endpoint', () => {
+  it('POST /api/order sets .order from array index', async () => {
+    // Create two databases; alphabetical default order is o-one, o-two.
+    await api('POST', '/api/database', {
+      body: { slug: 'o-one', host: 'h', port: 5432, user: 'u', database: 'd', readOnly: true },
+    });
+    await api('POST', '/api/database', {
+      body: { slug: 'o-two', host: 'h', port: 5432, user: 'u', database: 'd', readOnly: true },
+    });
+    // Send a reversed order: o-two first (order 0), o-one second (order 1).
+    const res = await api('POST', '/api/order', {
+      body: { databases: ['o-two', 'o-one'] },
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+
+    const state = await (await api('GET', '/api/state')).json();
+    assert.equal(state.databases['o-two'].order, 0);
+    assert.equal(state.databases['o-one'].order, 1);
+  });
+
+  it('ignores unknown slugs and still returns ok', async () => {
+    const res = await api('POST', '/api/order', {
+      body: { databases: ['o-one', 'does-not-exist'] },
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+  });
+
+  it('requires a token (403)', async () => {
+    const res = await api('POST', '/api/order', {
+      withToken: false,
+      body: { databases: ['o-one'] },
+    });
+    assert.equal(res.status, 403);
+  });
+});
+
+describe('apply on a read-only database', () => {
+  it('returns ok:false with the read-only message and runs nothing', async () => {
+    // o-one is read-only.
+    const res = await api('POST', '/api/db/o-one/apply', {
+      body: {
+        changes: [
+          { type: 'update', schema: 'public', table: 't', key: { id: '1' }, set: { name: 'x' } },
+        ],
+      },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, false);
+    assert.match(body.error, /read-only/i);
+  });
+
+  it('requires a token (403)', async () => {
+    const res = await api('POST', '/api/db/o-one/apply', {
+      withToken: false,
+      body: { changes: [] },
+    });
+    assert.equal(res.status, 403);
+  });
+});
+
+describe('query pagination', () => {
+  it('a non-select with a limit is not wrapped (runs unwrapped, no psql -> error JSON)', async () => {
+    // No real Postgres: runQuery returns ok:false. We assert the response shape
+    // (ok:false, no pagination fields) rather than real results.
+    const res = await api('POST', '/api/db/o-one/query', {
+      body: { sql: 'INSERT INTO t VALUES (1)', limit: 10 },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    // Either blocked (read-only guard) or a plain error; never paginated.
+    assert.equal(body.ok, false);
+    assert.equal(body.limit, undefined);
+    assert.equal(body.offset, undefined);
+  });
+
+  it('requires a token (403)', async () => {
+    const res = await api('POST', '/api/db/o-one/query', {
+      withToken: false,
+      body: { sql: 'SELECT 1', limit: 10 },
+    });
+    assert.equal(res.status, 403);
+  });
+});
+
+describe('primary-key endpoint', () => {
+  it('requires a token (403)', async () => {
+    const res = await api('GET', '/api/db/o-one/pk?schema=public&table=t', {
+      withToken: false,
+    });
+    assert.equal(res.status, 403);
+  });
+});
+
 describe('DNS-rebinding Host header guard', () => {
   // fetch cannot override the Host header, so use node:http with an explicit one.
   function rawRequest(hostHeader) {
