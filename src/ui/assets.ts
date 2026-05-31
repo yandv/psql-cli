@@ -72,6 +72,65 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px
 .proj-toolbar .spacer { flex: 1; }
 button:disabled { opacity: .4; cursor: not-allowed; border-color: var(--border); }
 button:disabled:hover { border-color: var(--border); }
+
+/* ---- data-browser dashboard ---- */
+.db .slug.clickable { cursor: pointer; }
+.db .slug.clickable:hover { color: var(--accent); text-decoration: underline; }
+.dash-bg { position: fixed; inset: 0; background: var(--bg); display: none; z-index: 50;
+  flex-direction: column; }
+.dash-bg.open { display: flex; }
+.dash-head { display: flex; align-items: center; gap: 12px; padding: 12px 18px;
+  border-bottom: 1px solid var(--border); background: var(--panel); flex: none; }
+.dash-head .slug { font-weight: 600; font-size: 15px; }
+.dash-head .conn { color: var(--muted); font-size: 12px; font-family: ui-monospace, monospace; }
+.dash-head .spacer { flex: 1; }
+.dash-body { flex: 1; display: flex; min-height: 0; }
+.dash-side { width: 280px; flex: none; border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+.dash-side .search { padding: 10px; border-bottom: 1px solid var(--border); flex: none; }
+.dash-tables { flex: 1; overflow: auto; padding: 6px 0; }
+.dash-tables .schema { font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
+  color: var(--muted); padding: 8px 12px 4px; }
+.dash-tables .tbl { padding: 5px 12px 5px 18px; cursor: pointer; font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dash-tables .tbl:hover { background: var(--panel2); }
+.dash-tables .tbl.active { background: var(--accent); color: #fff; }
+.dash-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.dash-tabs { display: flex; gap: 4px; padding: 8px 12px 0; border-bottom: 1px solid var(--border);
+  flex: none; }
+.dash-tab { padding: 6px 14px; border: 1px solid transparent; border-bottom: none; cursor: pointer;
+  border-radius: 6px 6px 0 0; color: var(--muted); background: none; }
+.dash-tab.active { color: var(--text); background: var(--panel); border-color: var(--border); }
+.dash-pane { flex: 1; display: none; flex-direction: column; min-height: 0; padding: 12px; }
+.dash-pane.active { display: flex; }
+.filters-bar { display: flex; flex-direction: column; gap: 6px; flex: none; margin-bottom: 10px; }
+.filter-row { display: flex; gap: 6px; align-items: center; }
+.filter-row select, .filter-row input { width: auto; flex: 1; min-width: 0; }
+.filter-row .op { flex: 0 0 110px; }
+.filter-row button { flex: none; }
+.filters-actions { display: flex; gap: 8px; }
+.grid-wrap { flex: 1; overflow: auto; border: 1px solid var(--border); border-radius: 8px;
+  min-height: 0; background: var(--panel); }
+table.grid { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 13px; }
+table.grid th, table.grid td { border: 1px solid var(--border); padding: 5px 9px; text-align: left;
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.grid th { background: var(--panel2); position: sticky; top: 0; cursor: pointer;
+  user-select: none; z-index: 1; }
+table.grid th:hover { color: var(--accent); }
+table.grid td.null { color: var(--muted); }
+table.grid tr:hover td { background: var(--panel2); }
+.grid-empty { color: var(--muted); padding: 14px; }
+.dash-foot { display: flex; align-items: center; gap: 10px; flex: none; margin-top: 10px; }
+.dash-foot .spacer { flex: 1; }
+.dash-foot select { width: auto; }
+.dash-foot .info { color: var(--muted); font-size: 12px; }
+.query-editor { display: flex; flex-direction: column; gap: 8px; flex: none; }
+.query-editor textarea { font-family: ui-monospace, monospace; min-height: 120px; resize: vertical; }
+.query-editor .toolbar { display: flex; align-items: center; gap: 10px; }
+.query-results { flex: 1; display: flex; flex-direction: column; min-height: 0; margin-top: 10px; }
+.banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 10px; font-size: 13px; }
+.banner.err { background: rgba(248,81,73,.12); border: 1px solid var(--danger); color: var(--danger); }
+.hint-ro { color: var(--rw); font-size: 12px; }
 `;
 
 export const INDEX_HTML = `<!doctype html>
@@ -167,6 +226,63 @@ export const INDEX_HTML = `<!doctype html>
     <div class="foot">
       <button id="projCancelBtn">Cancel</button>
       <button class="primary" id="projSaveBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="dash-bg" id="dashBg">
+  <div class="dash-head">
+    <span class="slug" id="dashSlug"></span>
+    <span class="badge" id="dashBadge"></span>
+    <span class="conn" id="dashConn"></span>
+    <div class="spacer"></div>
+    <button id="dashCloseBtn" title="Close (Esc)">✕</button>
+  </div>
+  <div class="dash-body">
+    <div class="dash-side">
+      <div class="search"><input id="dashTableSearch" placeholder="Filter tables…" /></div>
+      <div class="dash-tables" id="dashTables"></div>
+    </div>
+    <div class="dash-main">
+      <div class="dash-tabs">
+        <button class="dash-tab active" id="dashTabData">Data</button>
+        <button class="dash-tab" id="dashTabQuery">Query</button>
+      </div>
+      <div class="dash-pane active" id="dashPaneData">
+        <div class="filters-bar">
+          <div id="dashFilters"></div>
+          <div class="filters-actions">
+            <button class="small" id="dashAddFilter">+ filter</button>
+            <button class="small primary" id="dashApply">Apply</button>
+          </div>
+        </div>
+        <div class="grid-wrap" id="dashGrid"></div>
+        <div class="dash-foot">
+          <span class="info" id="dashPageInfo"></span>
+          <div class="spacer"></div>
+          <label style="margin:0">rows</label>
+          <select id="dashPageSize">
+            <option value="25">25</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+            <option value="200">200</option>
+          </select>
+          <button class="small" id="dashPrev">Prev</button>
+          <button class="small" id="dashNext">Next</button>
+        </div>
+      </div>
+      <div class="dash-pane" id="dashPaneQuery">
+        <div class="query-editor">
+          <div class="toolbar">
+            <button class="primary small" id="dashRun">Run</button>
+            <span class="badge" id="dashQueryBadge"></span>
+            <span class="hint-ro" id="dashQueryHint"></span>
+            <span class="info">Cmd/Ctrl+Enter to run</span>
+          </div>
+          <textarea id="dashSql" placeholder="SELECT * FROM …"></textarea>
+        </div>
+        <div class="query-results" id="dashQueryResults"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -293,13 +409,14 @@ function render() {
       el('span', { class: 'badge ' + (d.readOnly ? 'ro' : 'rw') }, d.readOnly ? 'read-only' : 'read-write'));
     if (s === state.defaultDatabase) badges.append(el('span', { class: 'badge def' }, 'default'));
     dl.append(el('div', { class: 'db' },
-      el('div', { class: 'top' }, el('span', { class: 'slug' }, s), badges),
+      el('div', { class: 'top' }, el('span', { class: 'slug clickable', title: 'Browse data', onclick: () => openDash(s) }, s), badges),
       el('div', { class: 'conn' }, d.user + '@' + d.host + ':' + d.port + '/' + d.database +
         (d.hasPassword ? '' : '  ⚠ no password set')),
       d.description ? el('div', { class: 'desc' }, d.description) : null,
       el('div', { class: 'actions' },
         el('button', { class: 'small', disabled: i === 0 ? '' : null, onclick: () => reorder('database', s, 'up') }, '▲'),
         el('button', { class: 'small', disabled: i === dbSlugs.length - 1 ? '' : null, onclick: () => reorder('database', s, 'down') }, '▼'),
+        el('button', { class: 'small primary', onclick: () => openDash(s) }, 'Browse'),
         el('button', { class: 'small', onclick: () => openDb(s) }, 'Edit'),
         el('button', { class: 'small', onclick: () => testDb(s) }, 'Test'),
         el('button', { class: 'small', onclick: () => setDefault(s) }, 'Set default'),
@@ -456,6 +573,274 @@ document.getElementById('projSaveBtn').onclick = saveProj;
 document.getElementById('projCancelBtn').onclick = closeProj;
 document.getElementById('defaultSel').onchange = (e) => setDefault(e.target.value);
 [dbBg, projBg].forEach(bg => bg.addEventListener('click', e => { if (e.target === bg) bg.classList.remove('open'); }));
+
+// ---- data-browser dashboard ----
+const dashBg = document.getElementById('dashBg');
+let dash = null; // { slug, tables, table, columns, filters, orderBy, limit, offset, readOnly }
+
+function resetDash(slug) {
+  dash = {
+    slug,
+    tables: [],
+    table: null,        // { schema, name, type }
+    columns: [],        // string[] column names for the selected table
+    filters: [],        // [{ column, op, value }]
+    orderBy: null,      // { column, dir }
+    limit: 50,
+    offset: 0,
+    readOnly: !!(state.databases[slug] && state.databases[slug].readOnly),
+  };
+}
+
+async function openDash(slug) {
+  const d = state.databases[slug];
+  if (!d) { toast('Unknown database', true); return; }
+  resetDash(slug);
+  document.getElementById('dashSlug').textContent = slug;
+  const badge = document.getElementById('dashBadge');
+  badge.className = 'badge ' + (d.readOnly ? 'ro' : 'rw');
+  badge.textContent = d.readOnly ? 'read-only' : 'read-write';
+  document.getElementById('dashConn').textContent = d.host + ':' + d.port + '/' + d.database;
+  document.getElementById('dashTableSearch').value = '';
+  document.getElementById('dashFilters').innerHTML = '';
+  document.getElementById('dashGrid').innerHTML = '';
+  document.getElementById('dashPageInfo').textContent = '';
+  document.getElementById('dashPageSize').value = '50';
+  document.getElementById('dashSql').value = '';
+  document.getElementById('dashQueryResults').innerHTML = '';
+  const qBadge = document.getElementById('dashQueryBadge');
+  qBadge.className = 'badge ' + (d.readOnly ? 'ro' : 'rw');
+  qBadge.textContent = d.readOnly ? 'read-only' : 'read-write';
+  document.getElementById('dashQueryHint').textContent = d.readOnly ? 'Write statements are blocked.' : '';
+  dashSetTab('data');
+  dashBg.classList.add('open');
+  try {
+    const r = await api('GET', '/db/' + encodeURIComponent(slug) + '/tables');
+    dash.tables = r.tables || [];
+    renderDashTables();
+  } catch (e) { toast(e.message, true); }
+}
+
+function closeDash() { dashBg.classList.remove('open'); dash = null; }
+
+function dashSetTab(name) {
+  const onData = name === 'data';
+  document.getElementById('dashTabData').classList.toggle('active', onData);
+  document.getElementById('dashTabQuery').classList.toggle('active', !onData);
+  document.getElementById('dashPaneData').classList.toggle('active', onData);
+  document.getElementById('dashPaneQuery').classList.toggle('active', !onData);
+  // Nice-to-have: prefill query editor when switching to an empty Query tab.
+  if (!onData && dash && dash.table) {
+    const ta = document.getElementById('dashSql');
+    if (!ta.value.trim()) {
+      ta.value = 'SELECT * FROM "' + dash.table.schema + '"."' + dash.table.name + '" LIMIT 50';
+    }
+  }
+}
+
+function renderDashTables() {
+  const wrap = document.getElementById('dashTables');
+  wrap.innerHTML = '';
+  const q = document.getElementById('dashTableSearch').value.trim().toLowerCase();
+  let tables = dash.tables;
+  if (q) tables = tables.filter(t => t.name.toLowerCase().includes(q));
+  if (!tables.length) { wrap.append(el('div', { class: 'grid-empty' }, 'No tables.')); return; }
+  // group by schema, preserving server order
+  const order = [];
+  const groups = {};
+  tables.forEach(t => {
+    if (!groups[t.schema]) { groups[t.schema] = []; order.push(t.schema); }
+    groups[t.schema].push(t);
+  });
+  order.forEach(schema => {
+    wrap.append(el('div', { class: 'schema' }, schema));
+    groups[schema].forEach(t => {
+      const active = dash.table && dash.table.schema === t.schema && dash.table.name === t.name;
+      const icon = t.type === 'view' ? '👁 ' : '📄 ';
+      wrap.append(el('div', {
+        class: 'tbl' + (active ? ' active' : ''),
+        title: t.schema + '.' + t.name,
+        onclick: () => selectTable(t),
+      }, icon + t.name));
+    });
+  });
+}
+
+async function selectTable(t) {
+  dash.table = t;
+  dash.filters = [];
+  dash.orderBy = null;
+  dash.offset = 0;
+  dash.columns = [];
+  dashSetTab('data');
+  renderDashTables();
+  document.getElementById('dashFilters').innerHTML = '';
+  try {
+    const r = await api('GET', '/db/' + encodeURIComponent(dash.slug) +
+      '/columns?schema=' + encodeURIComponent(t.schema) + '&table=' + encodeURIComponent(t.name));
+    dash.columns = (r.columns || []).map(c => c.name);
+  } catch (e) { toast(e.message, true); }
+  await loadBrowse();
+}
+
+const NULL_OPS = ['is null', 'is not null'];
+const FILTER_OPS = ['=', '<>', '<', '<=', '>', '>=', 'like', 'ilike', 'is null', 'is not null'];
+
+function renderFilters() {
+  const wrap = document.getElementById('dashFilters');
+  wrap.innerHTML = '';
+  dash.filters.forEach((f, idx) => {
+    const colSel = el('select', { onchange: e => { f.column = e.target.value; } });
+    dash.columns.forEach(c => {
+      const o = el('option', { value: c }, c);
+      if (c === f.column) o.selected = true;
+      colSel.append(o);
+    });
+    if (!f.column && dash.columns.length) f.column = dash.columns[0];
+    const valInput = el('input', {
+      value: f.value || '',
+      placeholder: 'value',
+      oninput: e => { f.value = e.target.value; },
+    });
+    const opSel = el('select', {
+      class: 'op',
+      onchange: e => {
+        f.op = e.target.value;
+        valInput.disabled = NULL_OPS.includes(f.op);
+      },
+    });
+    FILTER_OPS.forEach(op => {
+      const o = el('option', { value: op }, op);
+      if (op === f.op) o.selected = true;
+      opSel.append(o);
+    });
+    valInput.disabled = NULL_OPS.includes(f.op);
+    wrap.append(el('div', { class: 'filter-row' },
+      colSel, opSel, valInput,
+      el('button', { class: 'small', title: 'Remove', onclick: () => { dash.filters.splice(idx, 1); renderFilters(); } }, '✕')));
+  });
+}
+
+function addFilter() {
+  if (!dash.columns.length) { toast('Select a table first', true); return; }
+  dash.filters.push({ column: dash.columns[0], op: '=', value: '' });
+  renderFilters();
+}
+
+function activeFilters() {
+  return dash.filters
+    .filter(f => f.column && f.op)
+    .map(f => NULL_OPS.includes(f.op)
+      ? { column: f.column, op: f.op }
+      : { column: f.column, op: f.op, value: f.value || '' });
+}
+
+async function loadBrowse() {
+  if (!dash || !dash.table) return;
+  const body = {
+    schema: dash.table.schema,
+    table: dash.table.name,
+    filters: activeFilters(),
+    orderBy: dash.orderBy || undefined,
+    limit: dash.limit,
+    offset: dash.offset,
+  };
+  try {
+    const r = await api('POST', '/db/' + encodeURIComponent(dash.slug) + '/browse', body);
+    if (!r.ok) { toast(r.error || 'Query failed', true); return; }
+    renderGrid(document.getElementById('dashGrid'), r.columns, r.rows, true);
+    const start = r.rows.length ? r.offset + 1 : 0;
+    const end = r.offset + r.rows.length;
+    document.getElementById('dashPageInfo').textContent =
+      'Showing ' + start + '–' + end + ' of ' + r.total;
+    dash._total = r.total;
+    document.getElementById('dashPrev').disabled = dash.offset <= 0;
+    document.getElementById('dashNext').disabled = end >= r.total;
+  } catch (e) { toast(e.message, true); }
+}
+
+// Shared grid renderer. sortable=true wires column-header sorting for the Data tab.
+function renderGrid(container, columns, rows, sortable) {
+  container.innerHTML = '';
+  if (!columns || !columns.length) {
+    container.append(el('div', { class: 'grid-empty' }, 'No columns.'));
+    return;
+  }
+  const table = el('table', { class: 'grid' });
+  const headRow = el('tr');
+  columns.forEach(col => {
+    let label = col;
+    if (sortable && dash && dash.orderBy && dash.orderBy.column === col) {
+      label = col + (dash.orderBy.dir === 'asc' ? ' ▲' : ' ▼');
+    }
+    const th = el('th', sortable ? { onclick: () => sortBy(col), title: 'Sort' } : { title: col }, label);
+    headRow.append(th);
+  });
+  table.append(el('thead', null, headRow));
+  const tbody = el('tbody');
+  (rows || []).forEach(row => {
+    const tr = el('tr');
+    columns.forEach((c, ci) => {
+      const v = row[ci];
+      const isNull = v === null || v === undefined || v === '';
+      tr.append(el('td', { class: isNull ? 'null' : null, title: isNull ? '' : String(v) }, isNull ? '∅' : String(v)));
+    });
+    tbody.append(tr);
+  });
+  table.append(tbody);
+  if (!(rows && rows.length)) container.append(el('div', { class: 'grid-empty' }, 'No rows.'));
+  container.append(table);
+}
+
+function sortBy(col) {
+  if (dash.orderBy && dash.orderBy.column === col) {
+    dash.orderBy.dir = dash.orderBy.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    dash.orderBy = { column: col, dir: 'asc' };
+  }
+  dash.offset = 0;
+  loadBrowse();
+}
+
+async function runQuery() {
+  if (!dash) return;
+  const sql = document.getElementById('dashSql').value.trim();
+  const out = document.getElementById('dashQueryResults');
+  if (!sql) { toast('Enter a SQL statement', true); return; }
+  out.innerHTML = '';
+  try {
+    const r = await api('POST', '/db/' + encodeURIComponent(dash.slug) + '/query', { sql });
+    if (r.ok) {
+      out.append(el('div', { class: 'info', style: 'margin-bottom:8px' }, r.rowCount + ' rows'));
+      const wrap = el('div', { class: 'grid-wrap' });
+      out.append(wrap);
+      renderGrid(wrap, r.columns, r.rows, false);
+    } else if (r.blocked) {
+      out.append(el('div', { class: 'banner err' }, 'Blocked: ' + (r.error || 'read-only database')));
+    } else {
+      out.append(el('div', { class: 'banner err' }, r.error || 'Query failed'));
+    }
+  } catch (e) {
+    out.append(el('div', { class: 'banner err' }, e.message));
+  }
+}
+
+document.getElementById('dashCloseBtn').onclick = closeDash;
+document.getElementById('dashTabData').onclick = () => dashSetTab('data');
+document.getElementById('dashTabQuery').onclick = () => dashSetTab('query');
+document.getElementById('dashTableSearch').oninput = renderDashTables;
+document.getElementById('dashAddFilter').onclick = addFilter;
+document.getElementById('dashApply').onclick = () => { dash.offset = 0; loadBrowse(); };
+document.getElementById('dashPageSize').onchange = (e) => { dash.limit = Number(e.target.value) || 50; dash.offset = 0; loadBrowse(); };
+document.getElementById('dashPrev').onclick = () => { dash.offset = Math.max(0, dash.offset - dash.limit); loadBrowse(); };
+document.getElementById('dashNext').onclick = () => { dash.offset = dash.offset + dash.limit; loadBrowse(); };
+document.getElementById('dashRun').onclick = runQuery;
+document.getElementById('dashSql').addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); runQuery(); }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && dashBg.classList.contains('open')) closeDash();
+});
 
 refresh().catch(e => toast(e.message, true));
 `;

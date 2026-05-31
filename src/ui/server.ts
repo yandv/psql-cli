@@ -9,8 +9,10 @@ import {
   type ProjectEntry,
 } from '../config.js';
 import { setPassword, deletePassword, hasPassword } from '../keychain.js';
-import { testConnection, listServerDatabases } from '../db.js';
+import { testConnection, listServerDatabases, runQuery } from '../db.js';
 import { parseConnectionInput } from '../connparse.js';
+import { parseCsv } from '../csv.js';
+import { buildBrowseSql, buildCountSql, type BrowseFilter } from '../browsesql.js';
 import { INDEX_HTML, STYLES_CSS, APP_JS } from './assets.js';
 
 const MAX_BODY = 1024 * 1024; // 1MB
@@ -378,7 +380,215 @@ async function route(
     return sendJson(res, 200, result);
   }
 
+  // ---- Data-browser endpoints: /api/db/:slug/... ----
+  if (path.startsWith('/api/db/')) {
+    if (await routeBrowse(req, res, method, path)) return;
+  }
+
   sendJson(res, 404, { error: 'not found' });
+}
+
+/** Single-quote-escape a value for embedding in a SQL string literal. */
+function sqlLiteral(value: string): string {
+  return "'" + value.replace(/'/g, "''") + "'";
+}
+
+/**
+ * Resolve the DatabaseEntry referenced by `/api/db/:slug/...`. Returns the
+ * entry plus the trailing sub-path (e.g. "tables", "columns", "browse"). If the
+ * slug is unknown, writes a 404 JSON response and returns undefined.
+ */
+function resolveDbRoute(
+  res: ServerResponse,
+  path: string,
+): { db: DatabaseEntry; sub: string } | undefined {
+  const rest = path.slice('/api/db/'.length);
+  const slash = rest.indexOf('/');
+  const slug = decodeURIComponent(slash === -1 ? rest : rest.slice(0, slash));
+  const sub = slash === -1 ? '' : rest.slice(slash + 1);
+  const config = loadConfig();
+  const db = config.databases[slug];
+  if (!db) {
+    sendJson(res, 404, { ok: false, error: `Unknown database "${slug}".` });
+    return undefined;
+  }
+  return { db, sub };
+}
+
+/**
+ * Data-browser routes. Returns true if the request was handled (response
+ * written), false if no route matched. All queries go through runQuery so the
+ * database's read-only enforcement is preserved for free.
+ */
+async function routeBrowse(
+  req: IncomingMessage,
+  res: ServerResponse,
+  method: string,
+  path: string,
+): Promise<boolean> {
+  // GET /api/db/:slug/tables
+  if (method === 'GET' && path.endsWith('/tables')) {
+    const r = resolveDbRoute(res, path);
+    if (!r || r.sub !== 'tables') {
+      if (r) sendJson(res, 404, { ok: false, error: 'not found' });
+      return true;
+    }
+    const sql =
+      "SELECT table_schema AS schema, table_name AS name, " +
+      "CASE table_type WHEN 'BASE TABLE' THEN 'table' WHEN 'VIEW' THEN 'view' " +
+      "ELSE lower(table_type) END AS type FROM information_schema.tables " +
+      "WHERE table_schema NOT IN ('pg_catalog','information_schema') " +
+      'ORDER BY table_schema, table_name';
+    const result = runQuery(r.db, sql, { format: 'csv' });
+    if (!result.ok) {
+      sendJson(res, 200, { ok: false, error: result.stderr });
+      return true;
+    }
+    const { rows } = parseCsv(result.stdout);
+    sendJson(res, 200, {
+      ok: true,
+      tables: rows.map((row) => ({ schema: row[0], name: row[1], type: row[2] })),
+    });
+    return true;
+  }
+
+  // GET /api/db/:slug/columns?schema=<>&table=<>
+  if (method === 'GET' && path.endsWith('/columns')) {
+    const r = resolveDbRoute(res, path);
+    if (!r || r.sub !== 'columns') {
+      if (r) sendJson(res, 404, { ok: false, error: 'not found' });
+      return true;
+    }
+    const url = new URL(req.url ?? '/', `http://127.0.0.1:${boundPort}`);
+    const schema = url.searchParams.get('schema') ?? '';
+    const table = url.searchParams.get('table') ?? '';
+    const sql =
+      'SELECT column_name AS name, data_type AS type, is_nullable AS nullable, ' +
+      'column_default AS "default" FROM information_schema.columns ' +
+      `WHERE table_schema = ${sqlLiteral(schema)} AND table_name = ${sqlLiteral(table)} ` +
+      'ORDER BY ordinal_position';
+    const result = runQuery(r.db, sql, { format: 'csv' });
+    if (!result.ok) {
+      sendJson(res, 200, { ok: false, error: result.stderr });
+      return true;
+    }
+    const { rows } = parseCsv(result.stdout);
+    sendJson(res, 200, {
+      ok: true,
+      columns: rows.map((row) => ({
+        name: row[0],
+        type: row[1],
+        nullable: row[2],
+        default: row[3],
+      })),
+    });
+    return true;
+  }
+
+  // POST /api/db/:slug/browse
+  if (method === 'POST' && path.endsWith('/browse')) {
+    const r = resolveDbRoute(res, path);
+    if (!r || r.sub !== 'browse') {
+      if (r) sendJson(res, 404, { ok: false, error: 'not found' });
+      return true;
+    }
+    const body = (await readBody(req)) as Record<string, unknown>;
+    const spec = {
+      schema: asString(body.schema) ?? '',
+      table: asString(body.table) ?? '',
+      filters: Array.isArray(body.filters) ? (body.filters as BrowseFilter[]) : undefined,
+      orderBy: (body.orderBy as { column: string; dir: 'asc' | 'desc' } | undefined) ?? undefined,
+      limit: typeof body.limit === 'number' ? body.limit : undefined,
+      offset: typeof body.offset === 'number' ? body.offset : undefined,
+    };
+    let browseSql: string;
+    let countSql: string;
+    try {
+      browseSql = buildBrowseSql(spec);
+      countSql = buildCountSql({ schema: spec.schema, table: spec.table, filters: spec.filters });
+    } catch (err) {
+      sendJson(res, 400, {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return true;
+    }
+    const countRes = runQuery(r.db, countSql, { format: 'csv' });
+    if (!countRes.ok) {
+      sendJson(res, 200, { ok: false, error: countRes.stderr });
+      return true;
+    }
+    const rowsRes = runQuery(r.db, browseSql, { format: 'csv' });
+    if (!rowsRes.ok) {
+      sendJson(res, 200, { ok: false, error: rowsRes.stderr });
+      return true;
+    }
+    const countParsed = parseCsv(countRes.stdout);
+    const total = Number(countParsed.rows[0]?.[0] ?? 0) || 0;
+    const { columns, rows } = parseCsv(rowsRes.stdout);
+    const limit = clampLimit(spec.limit);
+    const offset = normalizeOffset(spec.offset);
+    sendJson(res, 200, {
+      ok: true,
+      columns,
+      rows,
+      total,
+      limit,
+      offset,
+      readOnly: r.db.readOnly,
+    });
+    return true;
+  }
+
+  // POST /api/db/:slug/query
+  if (method === 'POST' && path.endsWith('/query')) {
+    const r = resolveDbRoute(res, path);
+    if (!r || r.sub !== 'query') {
+      if (r) sendJson(res, 404, { ok: false, error: 'not found' });
+      return true;
+    }
+    const body = (await readBody(req)) as Record<string, unknown>;
+    const sql = asString(body.sql) ?? '';
+    const result = runQuery(r.db, sql, { format: 'csv' });
+    if (result.blocked) {
+      sendJson(res, 200, {
+        ok: false,
+        blocked: true,
+        error: result.stderr,
+        readOnly: r.db.readOnly,
+      });
+      return true;
+    }
+    if (!result.ok) {
+      sendJson(res, 200, { ok: false, error: result.stderr, readOnly: r.db.readOnly });
+      return true;
+    }
+    const { columns, rows } = parseCsv(result.stdout);
+    sendJson(res, 200, {
+      ok: true,
+      columns,
+      rows,
+      rowCount: rows.length,
+      readOnly: r.db.readOnly,
+    });
+    return true;
+  }
+
+  return false;
+}
+
+/** limit clamped to 1..500 (default 50); mirrors browsesql for the response echo. */
+function clampLimit(limit?: number): number {
+  if (typeof limit !== 'number' || !Number.isFinite(limit)) return 50;
+  const n = Math.floor(limit);
+  if (n < 1) return 1;
+  if (n > 500) return 500;
+  return n;
+}
+
+function normalizeOffset(offset?: number): number {
+  if (typeof offset !== 'number' || !Number.isFinite(offset)) return 0;
+  return Math.max(0, Math.floor(offset));
 }
 
 /**
