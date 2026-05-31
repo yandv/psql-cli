@@ -1,0 +1,39 @@
+{
+  "name": "@allanmxr/psql-cli",
+  "version": "0.1.0",
+  "description": "LLM-friendly, slug-based gateway to your PostgreSQL databases. Credentials live in the macOS Keychain; the LLM only ever sees slugs. Per-database read-only enforcement.",
+  "type": "module",
+  "bin": {
+    "psql-cli": "bin/psql-cli"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"test/*.test.mjs\"",
+    "dev": "tsc -p tsconfig.json --watch",
+    "start": "node dist/cli.js",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "psql",
+    "cli",
+    "llm",
+    "ai",
+    "read-only",
+    "keychain"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
