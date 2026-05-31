@@ -18,6 +18,7 @@ import {
   quoteIdent,
   sqlLiteral as sqlLit,
   type BrowseFilter,
+  type BrowseSpec,
 } from '../browsesql.js';
 import { INDEX_HTML, STYLES_CSS, APP_JS } from './assets.js';
 
@@ -533,7 +534,7 @@ async function routeBrowse(
       schema: asString(body.schema) ?? '',
       table: asString(body.table) ?? '',
       filters: Array.isArray(body.filters) ? (body.filters as BrowseFilter[]) : undefined,
-      orderBy: (body.orderBy as { column: string; dir: 'asc' | 'desc' } | undefined) ?? undefined,
+      orderBy: (body.orderBy as BrowseSpec['orderBy']) ?? undefined,
       limit: typeof body.limit === 'number' ? body.limit : undefined,
       offset: typeof body.offset === 'number' ? body.offset : undefined,
     };

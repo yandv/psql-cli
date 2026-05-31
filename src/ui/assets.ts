@@ -157,6 +157,39 @@ table.grid tr:hover td { background: var(--panel2); }
 .skel-line { height: 14px; margin: 8px 12px; }
 .skel-cell { height: 12px; }
 table.grid td.skel-cell-wrap { padding: 6px 9px; }
+/* skeleton db card variant (home screen first paint) */
+.db.skeleton { background: var(--panel2); pointer-events: none; }
+.db.skeleton::after { content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.08), transparent);
+  transform: translateX(-100%); animation: shimmer 1.2s infinite; }
+.db.skeleton .skel-line { margin: 0 0 8px; background: var(--bg); }
+.db.skeleton .skel-line:last-child { margin-bottom: 0; }
+.recent-chip.skeleton { width: 90px; height: 24px; border: none; }
+
+/* ---- sort indicators (multi-column) ---- */
+table.grid th .sort-ind { color: var(--accent); font-size: 11px; margin-left: 4px; }
+table.grid th .sort-pri { font-size: 9px; vertical-align: super; opacity: .8; }
+
+/* ---- inline editing / staged changes ---- */
+table.grid td.editable { cursor: cell; }
+table.grid td.dirty { outline: 2px solid var(--rw); outline-offset: -2px; }
+table.grid td.cell-null { color: var(--muted); font-style: italic; }
+table.grid tr.row-deleted td { text-decoration: line-through;
+  background: rgba(248,81,73,.12) !important; color: var(--danger); }
+table.grid td input.cell-edit { width: 100%; min-width: 80px; padding: 2px 4px;
+  font: inherit; background: var(--bg); color: var(--text);
+  border: 1px solid var(--accent); border-radius: 3px; }
+.pending-bar { display: flex; align-items: center; gap: 10px; flex: none;
+  background: rgba(240,136,62,.12); border: 1px solid var(--rw); color: var(--rw);
+  border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; position: sticky; top: 0; z-index: 2; }
+.pending-bar .spacer { flex: 1; }
+.pending-bar button { color: var(--text); }
+.nopk-note { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+.ctx-menu { position: fixed; z-index: 2000; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 4px; min-width: 150px; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+.ctx-menu .item { padding: 7px 12px; border-radius: 5px; cursor: pointer; font-size: 13px; }
+.ctx-menu .item:hover { background: var(--panel2); }
+.ctx-menu .item.danger { color: var(--danger); }
 
 /* ---- recents ---- */
 .recent-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -439,6 +472,26 @@ function skeletonRows(n, cols) {
 function showGridSkeleton(container, cols) {
   container.innerHTML = '';
   container.append(skeletonRows(6, cols));
+}
+// Home-screen shimmer: render placeholder db cards + recent chips on first
+// paint, before the initial /state fetch resolves. render() replaces them.
+function renderHomeSkeleton() {
+  const dl = document.getElementById('dbList');
+  if (dl) {
+    dl.innerHTML = '';
+    for (let i = 0; i < 6; i++) {
+      dl.append(el('div', { class: 'db skeleton' },
+        el('div', { class: 'skeleton skel-line', style: 'width:' + (40 + (i * 17) % 40) + '%' }),
+        el('div', { class: 'skeleton skel-line', style: 'width:' + (60 + (i * 11) % 30) + '%' })));
+    }
+  }
+  const rl = document.getElementById('recentList');
+  if (rl) {
+    rl.innerHTML = '';
+    const row = el('div', { class: 'recent-row' });
+    for (let i = 0; i < 3; i++) row.append(el('div', { class: 'recent-chip skeleton' }));
+    rl.append(row);
+  }
 }
 
 // ---- recently-opened sessions (localStorage) ----
@@ -954,10 +1007,15 @@ async function openTableTab(t) {
     table: t,
     columns: [],
     filters: [],
-    orderBy: null,
+    orderBy: [],         // [{ column, dir }] — multi-column sort
     limit: 50,
     offset: 0,
     total: null,
+    readOnly: dash.readOnly,
+    pk: null,            // null = unknown/loading, [] = no primary key
+    edits: new Map(),    // rowIndex -> { set:{col:val}, deleted:bool }
+    rows: [],            // last-loaded rows (original values for PK keys)
+    gridColumns: [],     // column order of last-loaded rows
     els: {},
   };
   buildTablePane(tab);
@@ -970,6 +1028,16 @@ async function openTableTab(t) {
       '/columns?schema=' + encodeURIComponent(t.schema) + '&table=' + encodeURIComponent(t.name));
     tab.columns = (r.columns || []).map(c => c.name);
   } catch (e) { toast(e.message, true); }
+  // Fetch primary key (needed to safely target rows for edit/delete).
+  if (!tab.readOnly) {
+    try {
+      const pkr = await api('GET', '/db/' + encodeURIComponent(dash.slug) +
+        '/pk?schema=' + encodeURIComponent(t.schema) + '&table=' + encodeURIComponent(t.name));
+      tab.pk = pkr.pk || [];
+    } catch (e) { tab.pk = []; }
+  } else {
+    tab.pk = [];
+  }
   await loadBrowse(tab);
 }
 
@@ -988,7 +1056,9 @@ function buildTablePane(tab) {
   const next = el('button', { class: 'small' }, 'Next');
   prev.onclick = () => { tab.offset = Math.max(0, tab.offset - tab.limit); loadBrowse(tab); };
   next.onclick = () => { tab.offset = tab.offset + tab.limit; loadBrowse(tab); };
+  const pending = el('div', { class: 'pending-bar', style: 'display:none' });
   const pane = el('div', { class: 'dash-pane' },
+    pending,
     el('div', { class: 'filters-bar' },
       filters,
       el('div', { class: 'filters-actions' },
@@ -1001,7 +1071,7 @@ function buildTablePane(tab) {
       el('label', { style: 'margin:0' }, 'rows'),
       pageSize, prev, next));
   tab.pane = pane;
-  tab.els = { filters, grid, pageInfo, prev, next };
+  tab.els = { filters, grid, pageInfo, prev, next, pending };
   panesEl().append(pane);
   renderFilters(tab);
 }
@@ -1057,12 +1127,14 @@ function activeFilters(tab) {
 
 async function loadBrowse(tab) {
   if (!dash || !tab || tab.kind !== 'table') return;
+  // A fresh load invalidates any staged edits (rowIndex would no longer match).
+  if (tab.edits) tab.edits.clear();
   const filters = activeFilters(tab);
   const body = {
     schema: tab.table.schema,
     table: tab.table.name,
     filters: filters,
-    orderBy: tab.orderBy || undefined,
+    orderBy: (tab.orderBy && tab.orderBy.length) ? tab.orderBy : undefined,
     limit: tab.limit,
     offset: tab.offset,
   };
@@ -1072,6 +1144,10 @@ async function loadBrowse(tab) {
     const r = await api('POST', '/db/' + encodeURIComponent(dash.slug) + '/browse', body);
     if (!r.ok) { grid.innerHTML = ''; toast(r.error || 'Query failed', true); return; }
     tab.total = r.total;
+    tab.readOnly = !!r.readOnly || dash.readOnly;
+    tab.rows = r.rows || [];
+    tab.gridColumns = r.columns || [];
+    renderPendingBar(tab);
     if (!r.rows || !r.rows.length) {
       grid.innerHTML = '';
       const msg = filters.length ? 'No rows (active filters).' : 'No rows.';
@@ -1090,11 +1166,28 @@ async function loadBrowse(tab) {
   } catch (e) { grid.innerHTML = ''; toast(e.message, true); }
 }
 
-function sortBy(tab, col) {
-  if (tab.orderBy && tab.orderBy.column === col) {
-    tab.orderBy.dir = tab.orderBy.dir === 'asc' ? 'desc' : 'asc';
+// Multi-column sort. Normal click on a NEW column => single-sort on it.
+// Click the SAME (only) sorted column => toggle its dir. Shift+click => add the
+// column to the sort (or toggle its dir if present, or remove it on a third
+// shift-click when already descending), keeping the others.
+function sortBy(tab, col, shift) {
+  const ob = tab.orderBy || (tab.orderBy = []);
+  const idx = ob.findIndex(o => o.column === col);
+  if (shift) {
+    if (idx === -1) {
+      ob.push({ column: col, dir: 'asc' });
+    } else if (ob[idx].dir === 'asc') {
+      ob[idx].dir = 'desc';
+    } else {
+      // third shift-click removes this column from the multi-sort
+      ob.splice(idx, 1);
+    }
   } else {
-    tab.orderBy = { column: col, dir: 'asc' };
+    if (idx !== -1 && ob.length === 1) {
+      ob[0].dir = ob[0].dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      tab.orderBy = [{ column: col, dir: 'asc' }];
+    }
   }
   tab.offset = 0;
   loadBrowse(tab);
@@ -1229,29 +1322,47 @@ function renderGrid(container, columns, rows, opts) {
     container.append(el('div', { class: 'grid-empty' }, 'No columns.'));
     return;
   }
+  // Editing is only offered for read-write tabs that have a known primary key.
+  const editable = !!(tab && tab.readOnly === false && tab.pk && tab.pk.length);
+  const multi = !!(tab && tab.orderBy && tab.orderBy.length > 1);
   const table = el('table', { class: 'grid' });
   const headRow = el('tr');
   columns.forEach(col => {
-    let label = col;
-    if (tab && tab.orderBy && tab.orderBy.column === col) {
-      label = col + (tab.orderBy.dir === 'asc' ? ' ▲' : ' ▼');
+    const th = el('th', tab ? { title: 'Click to sort, Shift+click to add' } : { title: col }, col);
+    if (tab) {
+      const oi = tab.orderBy ? tab.orderBy.findIndex(o => o.column === col) : -1;
+      if (oi !== -1) {
+        const o = tab.orderBy[oi];
+        th.append(el('span', { class: 'sort-ind' }, o.dir === 'asc' ? '▲' : '▼'));
+        if (multi) th.append(el('span', { class: 'sort-pri' }, String(oi + 1)));
+      }
+      th.addEventListener('click', (e) => sortBy(tab, col, e.shiftKey));
     }
-    const th = el('th', tab ? { onclick: () => sortBy(tab, col), title: 'Sort' } : { title: col }, label);
     headRow.append(th);
   });
   table.append(el('thead', null, headRow));
   const tbody = el('tbody');
   (rows || []).forEach((row, ri) => {
     const tr = el('tr');
+    const edit = tab && tab.edits ? tab.edits.get(ri) : null;
+    if (edit && edit.deleted) tr.classList.add('row-deleted');
     columns.forEach((c, ci) => {
-      const v = row[ci];
-      const isNull = v === null || v === undefined || v === '';
+      const staged = edit && edit.set && Object.prototype.hasOwnProperty.call(edit.set, c);
+      const v = staged ? edit.set[c] : row[ci];
+      const isNull = v === null || v === undefined;
+      const isEmpty = !isNull && v === '';
       const td = el('td', {
-        class: isNull ? 'null' : null,
+        class: isNull ? 'null cell-null' : (isEmpty ? 'null' : null),
         title: isNull ? '' : String(v),
         'data-row': String(ri),
         'data-col': c,
       }, isNull ? '∅' : String(v));
+      if (staged) td.classList.add('dirty');
+      if (editable) {
+        td.classList.add('editable');
+        td.addEventListener('dblclick', () => beginCellEdit(tab, td, ri, c));
+        td.addEventListener('contextmenu', (e) => { e.preventDefault(); openCellMenu(tab, e, ri, c); });
+      }
       tr.append(td);
     });
     tbody.append(tr);
@@ -1259,18 +1370,175 @@ function renderGrid(container, columns, rows, opts) {
   table.append(tbody);
   if (!(rows && rows.length)) container.append(el('div', { class: 'grid-empty' }, 'No rows.'));
   container.append(table);
+  if (tab) {
+    if (tab.readOnly === false && tab.pk && tab.pk.length === 0) {
+      container.insertBefore(
+        el('div', { class: 'nopk-note' }, 'No primary key — read-only grid'),
+        container.firstChild);
+    }
+    renderPendingBar(tab);
+  }
+}
+
+// ---- inline editing / staged changes (read-write + has primary key) ----
+function getEdit(tab, ri) {
+  let e = tab.edits.get(ri);
+  if (!e) { e = { set: {}, deleted: false }; tab.edits.set(ri, e); }
+  return e;
+}
+function pruneEdit(tab, ri) {
+  const e = tab.edits.get(ri);
+  if (e && !e.deleted && (!e.set || Object.keys(e.set).length === 0)) tab.edits.delete(ri);
+}
+// Stage a new value for one cell (value may be a string or null) and re-render.
+function stageSet(tab, ri, col, value) {
+  const e = getEdit(tab, ri);
+  const ci = tab.gridColumns.indexOf(col);
+  const orig = ci !== -1 ? tab.rows[ri][ci] : undefined;
+  // If the new value equals the original, drop the staged change for that cell.
+  const same = (orig === value) || (orig == null && value == null);
+  if (same) { if (e.set) delete e.set[col]; }
+  else { e.set[col] = value; }
+  pruneEdit(tab, ri);
+  refreshGrid(tab);
+}
+function beginCellEdit(tab, td, ri, col) {
+  if (closeCellMenu._open) closeCellMenu();
+  const cur = td.classList.contains('cell-null') ? '' : td.textContent;
+  td.textContent = '';
+  const input = el('input', { class: 'cell-edit', value: cur });
+  let done = false;
+  const commit = () => {
+    if (done) return; done = true;
+    stageSet(tab, ri, col, input.value);
+  };
+  const cancel = () => { if (done) return; done = true; refreshGrid(tab); };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+  });
+  input.addEventListener('blur', commit);
+  td.append(input);
+  input.focus();
+  input.select();
+}
+
+// ---- right-click context menu on a cell ----
+function closeCellMenu() {
+  if (closeCellMenu._el) { closeCellMenu._el.remove(); closeCellMenu._el = null; }
+  closeCellMenu._open = false;
+  document.removeEventListener('click', closeCellMenu);
+  document.removeEventListener('keydown', closeCellMenu._key);
+}
+function openCellMenu(tab, ev, ri, col) {
+  closeCellMenu();
+  const menu = el('div', { class: 'ctx-menu' },
+    el('div', { class: 'item', onclick: () => { closeCellMenu(); stageSet(tab, ri, col, null); } }, 'Set NULL'),
+    el('div', { class: 'item danger', onclick: () => { closeCellMenu(); getEdit(tab, ri).deleted = true; refreshGrid(tab); } }, 'Delete row'),
+    el('div', { class: 'item', onclick: () => { closeCellMenu(); tab.edits.delete(ri); refreshGrid(tab); } }, 'Revert row'));
+  menu.style.left = ev.clientX + 'px';
+  menu.style.top = ev.clientY + 'px';
+  document.body.append(menu);
+  closeCellMenu._el = menu;
+  closeCellMenu._open = true;
+  closeCellMenu._key = (e) => { if (e.key === 'Escape') closeCellMenu(); };
+  // Defer outside-click binding so this very contextmenu event doesn't close it.
+  setTimeout(() => {
+    document.addEventListener('click', closeCellMenu);
+    document.addEventListener('keydown', closeCellMenu._key);
+  }, 0);
+}
+
+// Re-render the currently-loaded rows (no network) reflecting staged edits.
+function refreshGrid(tab) {
+  if (!tab || tab.kind !== 'table') return;
+  if (tab.rows && tab.rows.length) {
+    renderGrid(tab.els.grid, tab.gridColumns, tab.rows, { tab });
+  } else {
+    renderPendingBar(tab);
+  }
+}
+
+// Sticky pending-changes bar shown when a tab has staged edits.
+function renderPendingBar(tab) {
+  const bar = tab.els && tab.els.pending;
+  if (!bar) return;
+  const n = tab.edits ? tab.edits.size : 0;
+  if (!n) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+  bar.innerHTML = '';
+  bar.style.display = 'flex';
+  bar.append(
+    el('span', null, n + ' pending change' + (n === 1 ? '' : 's')),
+    el('span', { class: 'spacer' }),
+    el('button', { class: 'small', onclick: () => discardEdits(tab) }, 'Discard'),
+    el('button', { class: 'small primary', onclick: () => saveEdits(tab) }, 'Save'));
+}
+
+function discardEdits(tab) {
+  if (tab.edits) tab.edits.clear();
+  refreshGrid(tab);
+}
+
+// Build the apply payload from staged edits and POST it. On success: reload
+// fresh rows. On failure: keep edits so the user can fix and retry.
+async function saveEdits(tab) {
+  if (!dash || !tab || tab.kind !== 'table') return;
+  if (tab.readOnly) { toast('This database is read-only.', true); return; }
+  if (!tab.pk || !tab.pk.length) { toast('No primary key — cannot save.', true); return; }
+  if (!tab.edits || !tab.edits.size) return;
+  const keyFor = (ri) => {
+    const key = {};
+    tab.pk.forEach(pkc => {
+      const ci = tab.gridColumns.indexOf(pkc);
+      key[pkc] = ci !== -1 ? tab.rows[ri][ci] : null;
+    });
+    return key;
+  };
+  const changes = [];
+  tab.edits.forEach((e, ri) => {
+    if (e.deleted) {
+      changes.push({ type: 'delete', schema: tab.table.schema, table: tab.table.name, key: keyFor(ri) });
+    } else if (e.set && Object.keys(e.set).length) {
+      changes.push({ type: 'update', schema: tab.table.schema, table: tab.table.name, key: keyFor(ri), set: e.set });
+    }
+  });
+  if (!changes.length) return;
+  try {
+    const r = await api('POST', '/db/' + encodeURIComponent(dash.slug) + '/apply', { changes });
+    if (r.ok) {
+      toast('Saved (applied ' + (r.applied != null ? r.applied : changes.length) + ')', 'ok');
+      tab.edits.clear();
+      await loadBrowse(tab);
+    } else {
+      toast(r.error || 'Apply failed (rolled back)', true);
+    }
+  } catch (e) { toast(e.message, true); }
 }
 
 document.getElementById('dashCloseBtn').onclick = () => closeDash();
 document.getElementById('dashTableSearch').oninput = renderDashTables;
 document.getElementById('dashSchemaSel').onchange = (e) => { dash.schema = e.target.value; renderDashTables(); };
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && dashBg.classList.contains('open')) closeDash();
+  // Cmd/Ctrl+S saves staged edits in the active table tab (read-write only).
+  if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')
+      && dashBg.classList.contains('open')) {
+    const t = activeTab();
+    if (t && t.kind === 'table' && t.edits && t.edits.size) {
+      e.preventDefault();
+      saveEdits(t);
+      return;
+    }
+  }
+  if (e.key === 'Escape') {
+    if (closeCellMenu._open) { closeCellMenu(); return; }
+    if (dashBg.classList.contains('open')) closeDash();
+  }
 });
 
 // Initial load: fetch state, restore the last-selected project filter (only if
 // it still exists), render, then resolve the current path (so a direct
 // /db/<slug> deep link opens the dashboard).
+renderHomeSkeleton(); // synchronous first paint, replaced when render() runs
 (async () => {
   try {
     state = await api('GET', '/state');
