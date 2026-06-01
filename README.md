@@ -72,7 +72,7 @@ On macOS you can launch the UI without a terminal:
 psql-cli install-app
 ```
 
-This creates `psql-cli.app` in `~/Applications`, so you can open it from Spotlight (⌘Space), Raycast, or Alfred. Launching it starts the UI and opens your browser; it's single-instance, so re-opening just focuses the existing tab.
+This creates `psql-cli.app` in `~/Applications`, so you can open it from Spotlight (⌘Space), Raycast, or Alfred. With Xcode Command Line Tools present (`swiftc`), it builds a **menu-bar app**: a 🐘 icon in the menu bar (no Dock icon) with **Open in Browser** and **Quit** (which stops the server). Without `swiftc` it falls back to a simple launcher that shows in the Dock (`--dock` forces this). Launching is single-instance — re-opening just focuses the existing tab.
 
 Or add one straight from the CLI (you'll be prompted for the password, which is not echoed):
 
