@@ -134,7 +134,9 @@ button:disabled:hover { border-color: var(--border); }
 .dash-pane.active { display: flex; }
 .dash-main .empty-main { flex: 1; display: flex; align-items: center; justify-content: center;
   color: var(--muted); padding: 24px; }
-.query-pane { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+/* No `display` here on purpose: the visibility is owned by .dash-pane(.active)
+   so an inactive SQL pane stays hidden. This only sets the inner layout. */
+.query-pane { flex-direction: column; min-height: 0; flex: 1; }
 .filters-bar { display: flex; flex-direction: column; gap: 6px; flex: none; margin-bottom: 10px; }
 .filter-row { display: flex; gap: 6px; align-items: center; }
 .filter-row select, .filter-row input { width: auto; flex: 1; min-width: 0; }
@@ -207,6 +209,8 @@ table.grid td input.cell-edit { width: 100%; min-width: 80px; padding: 2px 4px;
 .ctx-menu .item { padding: 7px 12px; border-radius: 5px; cursor: pointer; font-size: 13px; }
 .ctx-menu .item:hover { background: var(--panel2); }
 .ctx-menu .item.danger { color: var(--danger); }
+.ctx-menu .item.disabled { color: var(--muted); cursor: default; font-size: 12px; }
+.ctx-menu .item.disabled:hover { background: none; }
 
 /* ---- recents ---- */
 .recent-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

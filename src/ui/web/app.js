@@ -1378,6 +1378,10 @@ function renderGrid(container, columns, rows, opts) {
       if (editable) {
         td.classList.add('editable');
         td.addEventListener('dblclick', () => beginCellEdit(tab, td, ri, c));
+      }
+      // Always show our context menu on right-click (so it never falls back to
+      // the browser's). When not editable it explains why.
+      if (tab && tab.kind === 'table') {
         td.addEventListener('contextmenu', (e) => { e.preventDefault(); openCellMenu(tab, e, ri, c); });
       }
       tr.append(td);
@@ -1449,10 +1453,20 @@ function closeCellMenu() {
 }
 function openCellMenu(tab, ev, ri, col) {
   closeCellMenu();
-  const menu = el('div', { class: 'ctx-menu' },
-    el('div', { class: 'item', onclick: () => { closeCellMenu(); stageSet(tab, ri, col, null); } }, 'Set NULL'),
-    el('div', { class: 'item danger', onclick: () => { closeCellMenu(); getEdit(tab, ri).deleted = true; refreshGrid(tab); } }, 'Delete row'),
-    el('div', { class: 'item', onclick: () => { closeCellMenu(); tab.edits.delete(ri); refreshGrid(tab); } }, 'Revert row'));
+  const editable = !!(tab && tab.readOnly === false && tab.pk && tab.pk.length);
+  let menu;
+  if (editable) {
+    menu = el('div', { class: 'ctx-menu' },
+      el('div', { class: 'item', onclick: () => { closeCellMenu(); stageSet(tab, ri, col, null); } }, 'Set NULL'),
+      el('div', { class: 'item danger', onclick: () => { closeCellMenu(); getEdit(tab, ri).deleted = true; refreshGrid(tab); } }, 'Delete row'),
+      el('div', { class: 'item', onclick: () => { closeCellMenu(); tab.edits.delete(ri); refreshGrid(tab); } }, 'Revert row'));
+  } else {
+    // Not editable: show why, so right-click is never a dead no-op.
+    const reason = tab && tab.readOnly !== false
+      ? 'Read-only database — edit it in “＋ Database”, uncheck Read-only, to enable editing'
+      : 'Table has no primary key — cannot edit rows safely';
+    menu = el('div', { class: 'ctx-menu' }, el('div', { class: 'item disabled' }, reason));
+  }
   menu.style.left = ev.clientX + 'px';
   menu.style.top = ev.clientY + 'px';
   document.body.append(menu);
