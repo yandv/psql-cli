@@ -12,38 +12,10 @@ import {
 } from '../config.js';
 import { setPassword, deletePassword } from '../keychain.js';
 import { parseConnectionInput } from '../connparse.js';
+import { parseFlags } from '../args.js';
 
 // VERIFIED AES-128-CBC key for DBeaver credentials-config.json.
 const DBEAVER_KEY = Buffer.from('babb4a9f774ab853c96c2d653dfe544a', 'hex');
-
-interface Flags {
-  [k: string]: string | boolean;
-}
-
-function parseFlags(args: string[]): { positionals: string[]; flags: Flags } {
-  const flags: Flags = {};
-  const positionals: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a.startsWith('--')) {
-      const eq = a.indexOf('=');
-      if (eq !== -1) {
-        flags[a.slice(2, eq)] = a.slice(eq + 1);
-      } else {
-        const next = args[i + 1];
-        if (next !== undefined && !next.startsWith('--')) {
-          flags[a.slice(2)] = next;
-          i++;
-        } else {
-          flags[a.slice(2)] = true;
-        }
-      }
-    } else {
-      positionals.push(a);
-    }
-  }
-  return { positionals, flags };
-}
 
 /** Expand a leading ~ to the user's home directory. */
 function expandHome(p: string): string {

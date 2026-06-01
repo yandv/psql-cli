@@ -14,35 +14,7 @@ import {
   suggestPassphrase,
   type BundlePayload,
 } from '../exportbundle.js';
-
-interface Flags {
-  [k: string]: string | boolean;
-}
-
-function parseFlags(args: string[]): { positionals: string[]; flags: Flags } {
-  const flags: Flags = {};
-  const positionals: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a.startsWith('--')) {
-      const eq = a.indexOf('=');
-      if (eq !== -1) {
-        flags[a.slice(2, eq)] = a.slice(eq + 1);
-      } else {
-        const next = args[i + 1];
-        if (next !== undefined && !next.startsWith('--')) {
-          flags[a.slice(2)] = next;
-          i++;
-        } else {
-          flags[a.slice(2)] = true;
-        }
-      }
-    } else {
-      positionals.push(a);
-    }
-  }
-  return { positionals, flags };
-}
+import { parseFlags } from '../args.js';
 
 /** Read a password/passphrase without echoing it. Falls back to PSQL_CLI_PASSPHRASE env. */
 function promptHidden(label: string): Promise<string> {

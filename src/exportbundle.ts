@@ -96,6 +96,16 @@ export function decryptBundle(bundleText: string, passphrase: string): BundlePay
   if (file.v !== BUNDLE_VERSION) {
     throw new Error(`Unsupported export version ${file.v}.`);
   }
+  // The KDF parameters come from the (untrusted) file. Reject absurd values so a
+  // malicious bundle can't trigger a huge scrypt allocation (memory/CPU DoS) on
+  // import. These bounds comfortably cover any bundle this tool produces.
+  if (
+    !Number.isInteger(file.n) || file.n < 2 || file.n > (1 << 20) || (file.n & (file.n - 1)) !== 0 ||
+    !Number.isInteger(file.r) || file.r < 1 || file.r > 16 ||
+    !Number.isInteger(file.p) || file.p < 1 || file.p > 4
+  ) {
+    throw new Error('Export file has invalid or unsafe KDF parameters.');
+  }
   const salt = Buffer.from(file.salt, 'base64');
   const iv = Buffer.from(file.iv, 'base64');
   const tag = Buffer.from(file.tag, 'base64');

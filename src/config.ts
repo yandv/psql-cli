@@ -6,6 +6,8 @@ import {
   writeFileSync,
   existsSync,
   chmodSync,
+  renameSync,
+  unlinkSync,
 } from 'node:fs';
 
 export interface DatabaseEntry {
@@ -78,21 +80,25 @@ export function loadConfig(): Config {
 
 export function saveConfig(config: Config): void {
   mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-  const tmp = `${CONFIG_PATH}.tmp`;
+  // Write to a temp file, then atomically rename over the real one, so a crash
+  // mid-write can never leave a truncated/corrupt config.json.
+  const tmp = `${CONFIG_PATH}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 });
-  // Atomic-ish replace + tighten perms.
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), { mode: 0o600 });
+  try {
+    renameSync(tmp, CONFIG_PATH);
+  } catch (err) {
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
+    throw err;
+  }
   try {
     chmodSync(CONFIG_PATH, 0o600);
     chmodSync(CONFIG_DIR, 0o700);
   } catch {
     /* best effort */
-  }
-  // Clean up tmp if it exists (writeFileSync above already wrote final).
-  try {
-    if (existsSync(tmp)) writeFileSync(tmp, '');
-  } catch {
-    /* ignore */
   }
 }
 

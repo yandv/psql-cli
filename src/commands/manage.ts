@@ -11,35 +11,9 @@ import {
 import { setPassword, deletePassword, hasPassword } from '../keychain.js';
 import { testConnection, listServerDatabases } from '../db.js';
 import { parseConnectionInput } from '../connparse.js';
+import { parseFlags } from '../args.js';
 
-interface Flags {
-  [k: string]: string | boolean;
-}
-
-export function parseFlags(args: string[]): { positionals: string[]; flags: Flags } {
-  const flags: Flags = {};
-  const positionals: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a.startsWith('--')) {
-      const eq = a.indexOf('=');
-      if (eq !== -1) {
-        flags[a.slice(2, eq)] = a.slice(eq + 1);
-      } else {
-        const next = args[i + 1];
-        if (next !== undefined && !next.startsWith('--')) {
-          flags[a.slice(2)] = next;
-          i++;
-        } else {
-          flags[a.slice(2)] = true;
-        }
-      }
-    } else {
-      positionals.push(a);
-    }
-  }
-  return { positionals, flags };
-}
+export { parseFlags };
 
 /** Read a password without echoing it. Falls back to PSQL_CLI_PASSWORD env. */
 function promptPassword(label: string): Promise<string> {

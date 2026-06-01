@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   loadConfig,
   saveConfig,
@@ -11,6 +11,7 @@ import {
 } from '../config.js';
 import { setPassword, deletePassword, hasPassword, getPassword } from '../keychain.js';
 import { encryptBundle, decryptBundle, suggestPassphrase } from '../exportbundle.js';
+import { applyImport } from '../commands/transfer.js';
 import { testConnection, listServerDatabases, runQuery } from '../db.js';
 import { parseConnectionInput } from '../connparse.js';
 import { parseCsv } from '../csv.js';
@@ -159,6 +160,16 @@ function hostAllowed(req: IncomingMessage): boolean {
   return hostHeader === `127.0.0.1:${boundPort}` || hostHeader === `localhost:${boundPort}`;
 }
 
+/** Constant-time comparison of the request token against the session token. */
+function tokenMatches(provided: string | string[] | undefined, expected: string): boolean {
+  if (typeof provided !== 'string') return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  // timingSafeEqual requires equal length; the length check itself is not secret.
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
 async function handle(req: IncomingMessage, res: ServerResponse, token: string): Promise<void> {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${boundPort}`);
   const path = url.pathname;
@@ -190,7 +201,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, token: string):
   if (!hostAllowed(req)) {
     return sendJson(res, 403, { error: 'forbidden' });
   }
-  if (req.headers['x-psql-cli-token'] !== token) {
+  if (!tokenMatches(req.headers['x-psql-cli-token'], token)) {
     return sendJson(res, 403, { error: 'forbidden' });
   }
 
@@ -466,37 +477,9 @@ async function route(
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    const replace = body.replace === true;
-    const incomingDatabases = payload.databases as Record<string, DatabaseEntry>;
-    const incomingProjects = payload.projects as Record<string, ProjectEntry>;
-
-    let config: Config;
-    if (replace) {
-      const existing = loadConfig();
-      for (const slug of Object.keys(existing.databases)) {
-        try {
-          deletePassword(slug);
-        } catch {
-          /* best effort */
-        }
-      }
-      config = { version: 1, projects: {}, databases: {} };
-    } else {
-      config = loadConfig();
-    }
-    for (const [slug, p] of Object.entries(incomingProjects)) {
-      config.projects[slug] = p;
-    }
-    for (const [slug, entry] of Object.entries(incomingDatabases)) {
-      config.databases[slug] = entry;
-    }
-    const firstSlug = Object.keys(incomingDatabases)[0];
-    if (!config.defaultDatabase && firstSlug) config.defaultDatabase = firstSlug;
-    saveConfig(config);
-    for (const [slug, pw] of Object.entries(payload.passwords ?? {})) {
-      if (typeof pw === 'string' && pw) setPassword(slug, pw);
-    }
-    return sendJson(res, 200, { ok: true, imported: Object.keys(incomingDatabases).length });
+    // Apply via the shared CLI helper so import semantics can't drift.
+    const imported = applyImport(payload, { replace: body.replace === true, dryRun: false });
+    return sendJson(res, 200, { ok: true, imported });
   }
 
   // ---- Data-browser endpoints: /api/db/:slug/... ----

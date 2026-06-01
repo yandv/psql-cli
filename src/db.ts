@@ -113,11 +113,21 @@ export function runQuery(db: DatabaseEntry, sql: string, opts: RunOptions = {}):
     maxBuffer: 32 * 1024 * 1024,
   });
 
-  if (res.error && (res.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+  if (res.error) {
+    const code = (res.error as NodeJS.ErrnoException).code;
+    if (code === 'ETIMEDOUT') {
+      return {
+        ok: false,
+        stdout: res.stdout ?? '',
+        stderr: `Query exceeded the ${processTimeoutMs}ms process timeout and was killed.`,
+      };
+    }
+    // Any other spawn failure (e.g. ENOBUFS from exceeding maxBuffer, EACCES):
+    // surface it rather than returning an empty, confusing error.
     return {
       ok: false,
       stdout: res.stdout ?? '',
-      stderr: `Query exceeded the ${processTimeoutMs}ms process timeout and was killed.`,
+      stderr: (res.stderr ?? '').trim() || `psql could not run: ${res.error.message}`,
     };
   }
 
