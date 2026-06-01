@@ -12,7 +12,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-web.mjs",
     "test": "npm run build && node --test \"test/*.test.mjs\"",
     "dev": "tsc -p tsconfig.json --watch",
     "start": "node dist/cli.js",

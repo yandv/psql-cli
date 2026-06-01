@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>psql-cli</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<header>
+  <h1>🐘 psql-cli</h1>
+  <div class="spacer"></div>
+  <label style="margin:0">default</label>
+  <select id="defaultSel" style="width:auto"></select>
+  <button id="addProjBtn">+ Project</button>
+  <button class="primary" id="addDbBtn">+ Database</button>
+  <button id="exportBtn">Export</button>
+  <button id="importBtn">Import</button>
+</header>
+<div class="wrap">
+  <div class="col-main">
+    <div class="card">
+      <h2>Recent</h2>
+      <div id="recentList"></div>
+    </div>
+    <div class="card">
+      <h2>Databases</h2>
+      <div id="projFilter" class="pillrow"></div>
+      <div id="projToolbar" class="proj-toolbar" style="display:none"></div>
+      <div id="dbList"></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="dbModalBg">
+  <div class="modal">
+    <h3 id="dbModalTitle">Add database</h3>
+    <p class="hint">The password is stored in the macOS Keychain — never in the config file and never shown to an LLM.</p>
+    <label for="f_paste">Paste a connection (optional)</label>
+    <textarea id="f_paste" rows="3" placeholder="Paste a connection: postgres://… , jdbc:postgresql://… , host=… , JSON, or host / port / user / password on separate lines"></textarea>
+    <div style="margin-top:6px"><button id="dbParseBtn" class="small">Parse &amp; fill</button></div>
+    <label>Slug (LLM-facing id, lowercase-kebab)</label>
+    <input id="f_slug" placeholder="analytics-prod" />
+    <div class="grid2">
+      <div><label>Host</label><input id="f_host" /></div>
+      <div><label>Port</label><input id="f_port" value="5432" /></div>
+    </div>
+    <div class="grid2">
+      <div><label>User</label><input id="f_user" /></div>
+      <div>
+        <label>Database name</label>
+        <input id="f_database" list="dblist" />
+        <datalist id="dblist"></datalist>
+        <div style="margin-top:6px"><button id="dbListBtn" class="small">List databases</button></div>
+      </div>
+    </div>
+    <label>Password <span id="pwState" class="hint"></span></label>
+    <input id="f_password" type="password" placeholder="•••••••" autocomplete="new-password" />
+    <div class="grid2">
+      <div>
+        <label>Project</label>
+        <select id="f_project"></select>
+      </div>
+      <div>
+        <label>SSL mode</label>
+        <select id="f_sslmode">
+          <option value="">(default)</option>
+          <option>disable</option><option>allow</option><option>prefer</option>
+          <option>require</option><option>verify-ca</option><option>verify-full</option>
+        </select>
+      </div>
+    </div>
+    <label>Description (helps the LLM choose)</label>
+    <input id="f_desc" placeholder="Production analytics DB" />
+    <div class="switch">
+      <input type="checkbox" id="f_readonly" checked style="width:auto" />
+      <label for="f_readonly" style="margin:0">Read-only (block all write statements)</label>
+    </div>
+    <div class="foot">
+      <button id="dbTestBtn">Test connection</button>
+      <div class="spacer" style="flex:1"></div>
+      <button id="dbCancelBtn">Cancel</button>
+      <button class="primary" id="dbSaveBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="projModalBg">
+  <div class="modal">
+    <h3 id="projModalTitle">Add project</h3>
+    <label>Slug</label>
+    <input id="p_slug" placeholder="acme" />
+    <label>Name</label>
+    <input id="p_name" placeholder="Acme Corp" />
+    <label>Description</label>
+    <input id="p_desc" />
+    <div class="foot">
+      <button id="projCancelBtn">Cancel</button>
+      <button class="primary" id="projSaveBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="exportModalBg">
+  <div class="modal">
+    <h3>Export connections</h3>
+    <p class="hint">Exports all connections AND their passwords, encrypted, so you can move them to another machine.</p>
+    <p class="warn">Anyone with the file AND the passphrase can read your credentials — keep both safe.</p>
+    <label for="ex_pass">Passphrase</label>
+    <input id="ex_pass" type="password" placeholder="Choose a strong passphrase" autocomplete="new-password" />
+    <label for="ex_pass2">Confirm passphrase</label>
+    <input id="ex_pass2" type="password" placeholder="Repeat passphrase" autocomplete="new-password" />
+    <div style="margin-top:10px"><button id="exGenBtn" class="small">Generate strong passphrase</button></div>
+    <div id="exGenWrap" style="display:none">
+      <p class="warn" style="margin-top:14px">Save this passphrase — you'll need it to import. It is not stored anywhere.</p>
+      <div class="passphrase-box">
+        <code id="exGenPass"></code>
+        <button id="exCopyBtn" class="small">Copy</button>
+      </div>
+    </div>
+    <div class="foot">
+      <button id="exCancelBtn">Cancel</button>
+      <button class="primary" id="exDownloadBtn">Export &amp; download</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="importModalBg">
+  <div class="modal">
+    <h3>Import connections</h3>
+    <p class="hint">Select an exported file and enter the passphrase used to create it.</p>
+    <label for="im_file">Export file (.json)</label>
+    <input id="im_file" type="file" accept=".json" />
+    <label for="im_pass">Passphrase</label>
+    <input id="im_pass" type="password" placeholder="Passphrase used at export" autocomplete="off" />
+    <div class="switch">
+      <input type="checkbox" id="im_replace" style="width:auto" />
+      <label for="im_replace" style="margin:0">Replace existing (instead of merge)</label>
+    </div>
+    <div class="foot">
+      <button id="imCancelBtn">Cancel</button>
+      <button class="primary" id="imImportBtn">Import</button>
+    </div>
+  </div>
+</div>
+
+<div class="dash-bg" id="dashBg">
+  <div class="dash-head">
+    <span class="slug" id="dashSlug"></span>
+    <span class="badge" id="dashBadge"></span>
+    <span class="conn" id="dashConn"></span>
+    <div class="spacer"></div>
+    <button id="dashCloseBtn" title="Close (Esc)">✕</button>
+  </div>
+  <div class="dash-body">
+    <div class="dash-side">
+      <div class="search">
+        <select id="dashSchemaSel" class="schema-sel"></select>
+        <input id="dashTableSearch" placeholder="Filter tables…" />
+      </div>
+      <div class="dash-tables" id="dashTables"></div>
+    </div>
+    <div class="dash-main">
+      <div class="dash-tabbar" id="dashTabBar"></div>
+      <div class="dash-panes" id="dashPanes"></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>
