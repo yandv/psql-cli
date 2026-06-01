@@ -220,6 +220,15 @@ table.grid td input.cell-edit { width: 100%; min-width: 80px; padding: 2px 4px;
 
 /* ---- schema filter ---- */
 .dash-side .search .schema-sel { margin-bottom: 8px; }
+
+/* ---- export/import ---- */
+.modal .warn { background: rgba(240,136,62,.12); border: 1px solid var(--rw); color: var(--rw);
+  border-radius: 8px; padding: 10px 12px; font-size: 12px; margin: 0 0 12px; }
+.passphrase-box { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px;
+  background: var(--bg); border: 1px solid var(--accent); border-radius: 8px; padding: 10px 12px; }
+.passphrase-box code { flex: 1; min-width: 0; font-family: ui-monospace, monospace; font-size: 14px;
+  word-break: break-all; user-select: all; color: var(--text); }
+.passphrase-box button { flex: none; }
 `;
 
 export const INDEX_HTML = `<!doctype html>
@@ -238,6 +247,8 @@ export const INDEX_HTML = `<!doctype html>
   <select id="defaultSel" style="width:auto"></select>
   <button id="addProjBtn">+ Project</button>
   <button class="primary" id="addDbBtn">+ Database</button>
+  <button id="exportBtn">Export</button>
+  <button id="importBtn">Import</button>
 </header>
 <div class="wrap">
   <div class="col-main">
@@ -319,6 +330,49 @@ export const INDEX_HTML = `<!doctype html>
     <div class="foot">
       <button id="projCancelBtn">Cancel</button>
       <button class="primary" id="projSaveBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="exportModalBg">
+  <div class="modal">
+    <h3>Export connections</h3>
+    <p class="hint">Exports all connections AND their passwords, encrypted, so you can move them to another machine.</p>
+    <p class="warn">Anyone with the file AND the passphrase can read your credentials — keep both safe.</p>
+    <label for="ex_pass">Passphrase</label>
+    <input id="ex_pass" type="password" placeholder="Choose a strong passphrase" autocomplete="new-password" />
+    <label for="ex_pass2">Confirm passphrase</label>
+    <input id="ex_pass2" type="password" placeholder="Repeat passphrase" autocomplete="new-password" />
+    <div style="margin-top:10px"><button id="exGenBtn" class="small">Generate strong passphrase</button></div>
+    <div id="exGenWrap" style="display:none">
+      <p class="warn" style="margin-top:14px">Save this passphrase — you'll need it to import. It is not stored anywhere.</p>
+      <div class="passphrase-box">
+        <code id="exGenPass"></code>
+        <button id="exCopyBtn" class="small">Copy</button>
+      </div>
+    </div>
+    <div class="foot">
+      <button id="exCancelBtn">Cancel</button>
+      <button class="primary" id="exDownloadBtn">Export &amp; download</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="importModalBg">
+  <div class="modal">
+    <h3>Import connections</h3>
+    <p class="hint">Select an exported file and enter the passphrase used to create it.</p>
+    <label for="im_file">Export file (.json)</label>
+    <input id="im_file" type="file" accept=".json" />
+    <label for="im_pass">Passphrase</label>
+    <input id="im_pass" type="password" placeholder="Passphrase used at export" autocomplete="off" />
+    <div class="switch">
+      <input type="checkbox" id="im_replace" style="width:auto" />
+      <label for="im_replace" style="margin:0">Replace existing (instead of merge)</label>
+    </div>
+    <div class="foot">
+      <button id="imCancelBtn">Cancel</button>
+      <button class="primary" id="imImportBtn">Import</button>
     </div>
   </div>
 </div>
@@ -847,8 +901,114 @@ async function delProj(slug) {
   catch (e) { toast(e.message, true); }
 }
 
+// ---- export modal ----
+const exportBg = document.getElementById('exportModalBg');
+function openExport() {
+  document.getElementById('ex_pass').value = '';
+  document.getElementById('ex_pass2').value = '';
+  document.getElementById('exGenPass').textContent = '';
+  document.getElementById('exGenWrap').style.display = 'none';
+  exportBg.classList.add('open');
+}
+function closeExport() { exportBg.classList.remove('open'); }
+// Create a Blob from the encrypted bundle and trigger a browser download.
+function downloadBundle(bundle, filename) {
+  const blob = new Blob([bundle], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = el('a', { href: url, download: filename || 'psql-cli-export.json' });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+// Generate path: ask the server for a strong passphrase, show it, download bundle.
+async function generatePassphrase() {
+  try {
+    const r = await api('POST', '/export', { generate: true });
+    if (r.passphrase) {
+      document.getElementById('exGenPass').textContent = r.passphrase;
+      document.getElementById('exGenWrap').style.display = 'block';
+    }
+    if (r.ok && r.bundle) {
+      downloadBundle(r.bundle, r.filename);
+      toast('Exported — save the generated passphrase!', 'ok');
+    }
+  } catch (e) { toast(e.message, true); }
+}
+// Typed-passphrase path: require matching passphrases, then export + download.
+async function doExport() {
+  const pass = document.getElementById('ex_pass').value;
+  const pass2 = document.getElementById('ex_pass2').value;
+  if (!pass) { toast('Enter a passphrase or click Generate.', true); return; }
+  if (pass !== pass2) { toast('Passphrases do not match.', true); return; }
+  try {
+    const r = await api('POST', '/export', { passphrase: pass });
+    if (r.ok && r.bundle) {
+      downloadBundle(r.bundle, r.filename);
+      closeExport();
+      toast('Exported', 'ok');
+    } else {
+      toast(r.error || 'Export failed.', true);
+    }
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---- import modal ----
+const importBg = document.getElementById('importModalBg');
+function openImport() {
+  document.getElementById('im_file').value = '';
+  document.getElementById('im_pass').value = '';
+  document.getElementById('im_replace').checked = false;
+  importBg.classList.add('open');
+}
+function closeImport() { importBg.classList.remove('open'); }
+// Read the chosen file as text (FileReader), POST to /api/import, refresh on success.
+async function doImport() {
+  const fileInput = document.getElementById('im_file');
+  const pass = document.getElementById('im_pass').value;
+  const file = fileInput.files && fileInput.files[0];
+  if (!file) { toast('Choose an export file first.', true); return; }
+  if (!pass) { toast('Enter the passphrase.', true); return; }
+  let bundle;
+  try {
+    bundle = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Could not read file.'));
+      reader.readAsText(file);
+    });
+  } catch (e) { toast(e.message, true); return; }
+  try {
+    const r = await api('POST', '/import', {
+      bundle, passphrase: pass, replace: document.getElementById('im_replace').checked,
+    });
+    if (r.ok) {
+      closeImport();
+      await refresh();
+      const n = r.imported || 0;
+      toast('Imported ' + n + ' connection' + (n === 1 ? '' : 's'), 'ok');
+    } else {
+      toast(r.error || 'Import failed.', true);
+    }
+  } catch (e) { toast(e.message, true); }
+}
+
 document.getElementById('addDbBtn').onclick = () => openDb(null);
 document.getElementById('addProjBtn').onclick = () => openProj(null);
+document.getElementById('exportBtn').onclick = openExport;
+document.getElementById('importBtn').onclick = openImport;
+document.getElementById('exGenBtn').onclick = generatePassphrase;
+document.getElementById('exCopyBtn').onclick = () => {
+  const txt = document.getElementById('exGenPass').textContent || '';
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(() => toast('Copied', 'ok'), () => toast('Copy failed', true));
+  } else { toast('Copy not supported', true); }
+};
+document.getElementById('exDownloadBtn').onclick = doExport;
+document.getElementById('exCancelBtn').onclick = closeExport;
+document.getElementById('imImportBtn').onclick = doImport;
+document.getElementById('imCancelBtn').onclick = closeImport;
+[exportBg, importBg].forEach(bg => bg.addEventListener('click', e => { if (e.target === bg) bg.classList.remove('open'); }));
 document.getElementById('dbSaveBtn').onclick = saveDb;
 document.getElementById('dbCancelBtn').onclick = closeDb;
 document.getElementById('dbTestBtn').onclick = () => testDb(null);

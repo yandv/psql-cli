@@ -5,10 +5,12 @@ import {
   saveConfig,
   validateSlug,
   compareByOrder,
+  type Config,
   type DatabaseEntry,
   type ProjectEntry,
 } from '../config.js';
-import { setPassword, deletePassword, hasPassword } from '../keychain.js';
+import { setPassword, deletePassword, hasPassword, getPassword } from '../keychain.js';
+import { encryptBundle, decryptBundle, suggestPassphrase } from '../exportbundle.js';
 import { testConnection, listServerDatabases, runQuery } from '../db.js';
 import { parseConnectionInput } from '../connparse.js';
 import { parseCsv } from '../csv.js';
@@ -23,6 +25,7 @@ import {
 import { INDEX_HTML, STYLES_CSS, APP_JS } from './assets.js';
 
 const MAX_BODY = 1024 * 1024; // 1MB
+const MAX_IMPORT_BODY = 5 * 1024 * 1024; // 5MB — encrypted bundles can be larger
 
 /** A DatabaseEntry as exposed over the API: never includes a password, always a hasPassword flag. */
 function publicEntry(d: DatabaseEntry): DatabaseEntry & { hasPassword: boolean } {
@@ -58,13 +61,13 @@ function sendText(res: ServerResponse, status: number, type: string, body: strin
   res.end(body);
 }
 
-function readBody(req: IncomingMessage): Promise<unknown> {
+function readBody(req: IncomingMessage, maxBody = MAX_BODY): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > MAX_BODY) {
+      if (size > maxBody) {
         reject(new Error('Request body too large.'));
         req.destroy();
         return;
@@ -415,6 +418,85 @@ async function route(
     // No password supplied: fall back to the stored Keychain password for this slug.
     const result = testConnection(entry);
     return sendJson(res, 200, result);
+  }
+
+  // POST /api/export — build the full payload (config + Keychain passwords) and
+  // return it AS AN ENCRYPTED bundle. The bundle is safe to return over
+  // localhost; raw passwords are never exposed outside the encrypted blob.
+  if (method === 'POST' && path === '/api/export') {
+    const body = (await readBody(req)) as Record<string, unknown>;
+    const explicit = asString(body.passphrase);
+    const generate = body.generate === true;
+    if (!explicit && !generate) {
+      return sendJson(res, 400, { error: 'passphrase required' });
+    }
+    const passphrase = explicit || suggestPassphrase();
+    const config = loadConfig();
+    const passwords: Record<string, string> = {};
+    for (const slug of Object.keys(config.databases)) {
+      const pw = getPassword(slug);
+      if (pw !== undefined && pw !== '') passwords[slug] = pw;
+    }
+    const bundle = encryptBundle(
+      { projects: config.projects, databases: config.databases, passwords },
+      passphrase,
+    );
+    return sendJson(res, 200, {
+      ok: true,
+      filename: 'psql-cli-export.json',
+      bundle,
+      ...(explicit ? {} : { passphrase }),
+    });
+  }
+
+  // POST /api/import — decrypt a bundle and apply it (merge or replace), storing
+  // passwords in the Keychain. Allows a larger body for sizable bundles.
+  if (method === 'POST' && path === '/api/import') {
+    const body = (await readBody(req, MAX_IMPORT_BODY)) as Record<string, unknown>;
+    const bundle = asString(body.bundle);
+    const passphrase = asString(body.passphrase);
+    if (!bundle) return sendJson(res, 400, { ok: false, error: 'bundle required' });
+    if (!passphrase) return sendJson(res, 400, { ok: false, error: 'passphrase required' });
+    let payload: { projects: unknown; databases: unknown; passwords: Record<string, string> };
+    try {
+      payload = decryptBundle(bundle, passphrase);
+    } catch (err) {
+      return sendJson(res, 400, {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    const replace = body.replace === true;
+    const incomingDatabases = payload.databases as Record<string, DatabaseEntry>;
+    const incomingProjects = payload.projects as Record<string, ProjectEntry>;
+
+    let config: Config;
+    if (replace) {
+      const existing = loadConfig();
+      for (const slug of Object.keys(existing.databases)) {
+        try {
+          deletePassword(slug);
+        } catch {
+          /* best effort */
+        }
+      }
+      config = { version: 1, projects: {}, databases: {} };
+    } else {
+      config = loadConfig();
+    }
+    for (const [slug, p] of Object.entries(incomingProjects)) {
+      config.projects[slug] = p;
+    }
+    for (const [slug, entry] of Object.entries(incomingDatabases)) {
+      config.databases[slug] = entry;
+    }
+    const firstSlug = Object.keys(incomingDatabases)[0];
+    if (!config.defaultDatabase && firstSlug) config.defaultDatabase = firstSlug;
+    saveConfig(config);
+    for (const [slug, pw] of Object.entries(payload.passwords ?? {})) {
+      if (typeof pw === 'string' && pw) setPassword(slug, pw);
+    }
+    return sendJson(res, 200, { ok: true, imported: Object.keys(incomingDatabases).length });
   }
 
   // ---- Data-browser endpoints: /api/db/:slug/... ----
