@@ -13,6 +13,7 @@ import {
   cmdImportLegacy,
 } from './commands/manage.js';
 import { cmdUi } from './commands/ui.js';
+import { cmdInstallApp } from './commands/installapp.js';
 import { cmdImportDbeaver } from './commands/dbeaver.js';
 import { cmdExport, cmdImport } from './commands/transfer.js';
 
@@ -29,6 +30,7 @@ Query:
 Manage:
   psql-cli default <slug>                     set the default database
   psql-cli ui                                 open the web UI to add/edit databases & projects
+  psql-cli install-app                        install a macOS app to launch the UI from Spotlight/Raycast
   psql-cli db add|edit|rm|show ...            manage databases from the CLI
   psql-cli project list|add|edit|rm ...       manage projects
   psql-cli test <slug>                        test a connection
@@ -76,6 +78,8 @@ async function main(): Promise<number> {
       return cmdTest(rest);
     case 'ui':
       return cmdUi(rest);
+    case 'install-app':
+      return cmdInstallApp(rest);
     case 'import-legacy':
       return cmdImportLegacy(rest);
     case 'import-dbeaver':

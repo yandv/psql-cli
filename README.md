@@ -66,6 +66,14 @@ psql-cli ui
 
 This starts a local server bound to `127.0.0.1`, prints a URL containing a one-time token, and lets you add databases, set a description and read-only flag, and test the connection — all without ever putting a password on a command line.
 
+On macOS you can launch the UI without a terminal:
+
+```bash
+psql-cli install-app
+```
+
+This creates `psql-cli.app` in `~/Applications`, so you can open it from Spotlight (⌘Space), Raycast, or Alfred. Launching it starts the UI and opens your browser; it's single-instance, so re-opening just focuses the existing tab.
+
 Or add one straight from the CLI (you'll be prompted for the password, which is not echoed):
 
 ```bash
