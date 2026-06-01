@@ -102,10 +102,34 @@ button:disabled:hover { border-color: var(--border); }
 .dash-tables .tbl:hover { background: var(--panel2); }
 .dash-tables .tbl.active { background: var(--accent); color: #fff; }
 .dash-side .nav-divider { border-top: 1px solid var(--border); margin: 0; flex: none; }
-.dash-side .sql-entry { padding: 10px 12px; cursor: pointer; font-size: 13px; flex: none;
-  color: var(--text); background: var(--panel); }
-.dash-side .sql-entry:hover { background: var(--panel2); }
-.dash-side .sql-entry.active { background: var(--accent); color: #fff; }
+
+/* ---- open tabs (vertical, ordered, drag-reorderable) ---- */
+.open-tabs { flex: none; display: flex; flex-direction: column; max-height: 45%;
+  min-height: 0; }
+.open-tabs .open-tabs-head { font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
+  color: var(--muted); padding: 10px 12px 4px; flex: none; }
+.open-tabs .open-tab-list { overflow: auto; flex: 1; min-height: 0; padding: 0 0 4px; }
+.open-tabs .open-tabs-empty { color: var(--muted); font-size: 12px; padding: 4px 12px 8px; }
+.open-tab { display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 6px;
+  cursor: pointer; font-size: 13px; border-left: 2px solid transparent; }
+.open-tab:hover { background: var(--panel2); }
+.open-tab.active { background: var(--accent); color: #fff; border-left-color: #fff; }
+.open-tab .handle { cursor: grab; color: var(--muted); font-size: 14px; user-select: none;
+  flex: none; padding: 0 1px; }
+.open-tab.active .handle { color: rgba(255,255,255,.8); }
+.open-tab .handle:active { cursor: grabbing; }
+.open-tab .ot-icon { flex: none; }
+.open-tab .ot-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.open-tab .x { flex: none; color: var(--muted); border: none; background: none; padding: 0 4px;
+  border-radius: 4px; font-size: 13px; line-height: 1; opacity: 0; }
+.open-tab:hover .x { opacity: 1; }
+.open-tab.active .x { color: rgba(255,255,255,.85); opacity: 1; }
+.open-tab .x:hover { color: var(--danger); border: none; }
+.open-tab.dragging { opacity: .45; }
+.open-tab.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
+.open-tab.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
+.open-tabs .add-query { margin: 4px 10px 8px; flex: none; text-align: left; }
 .dash-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .dash-panes { flex: 1; display: flex; min-height: 0; }
 .dash-pane { flex: 1; display: none; flex-direction: column; min-height: 0; padding: 12px; min-width: 0; }
@@ -308,13 +332,17 @@ export const INDEX_HTML = `<!doctype html>
   </div>
   <div class="dash-body">
     <div class="dash-side">
+      <div class="open-tabs">
+        <div class="open-tabs-head">Open tabs</div>
+        <div class="open-tab-list" id="dashOpenTabs"></div>
+        <button class="small add-query" id="dashAddQueryBtn">＋ Query</button>
+      </div>
+      <div class="nav-divider"></div>
       <div class="search">
         <select id="dashSchemaSel" class="schema-sel"></select>
         <input id="dashTableSearch" placeholder="Filter tables…" />
       </div>
       <div class="dash-tables" id="dashTables"></div>
-      <div class="nav-divider"></div>
-      <div class="sql-entry" id="dashSqlEntry">⌑ SQL editor</div>
     </div>
     <div class="dash-main">
       <div class="dash-panes" id="dashPanes"></div>
@@ -525,7 +553,7 @@ function renderRecent() {
 // Each context owns its own URL:
 //   /database/:slug                          -> dashboard open, no context
 //   /database/:slug/table/:schema/:table     -> that table context
-//   /database/:slug/query                    -> the single SQL editor context
+//   /database/:slug/query/:n                  -> the SQL editor context numbered n
 function navigate(path) {
   if (location.pathname !== path) history.pushState({}, '', path);
 }
@@ -553,12 +581,13 @@ async function route() {
     openTableContext(t, true);
     return;
   }
-  // /database/:slug/query
-  m = p.match(/^\\/database\\/([^/]+)\\/query\\/?$/);
+  // /database/:slug/query/:n  (n optional for backward-compat)
+  m = p.match(/^\\/database\\/([^/]+)\\/query(?:\\/([0-9]+))?\\/?$/);
   if (m) {
     const slug = decodeURIComponent(m[1]);
     if (!(await ensureDash(slug, true))) return;
-    openSqlContext(true);
+    const n = m[2] ? Number(m[2]) : null;
+    openSqlContext(true, n);
     return;
   }
   // /database/:slug (no context)
@@ -840,12 +869,16 @@ const dashBg = document.getElementById('dashBg');
 // a CACHE of built contexts keyed by context-id so returning to a context
 // preserves its filters/sort/staged edits. Only the active context's pane is
 // shown; the others are display:none.
-//   dash = { slug, tables, schema, readOnly, panes: Map<ctxId, ctx>, activeId, sql:ctx|null }
-// Context ids: 'table:<schema>.<name>' and 'sql'.
+//   dash = { slug, tables, schema, readOnly, panes: Map<ctxId, ctx>, order:[ctxId],
+//            activeId, queryNo }
+// Context ids: 'table:<schema>.<name>' and 'sql:<n>'.
+// 'order' is the ordered list of OPEN tab ctxIds shown vertically in the
+// sidebar (drag-reorderable). 'queryNo' is the per-database incrementing SQL
+// tab counter (titles "Query N").
 // Each context owns its OWN state object + DOM pane:
 //   Table ctx: { id, kind:'table', table:{schema,name,type}, columns, filters,
 //                orderBy, limit, offset, total, pane, els{...}, edits, ... }
-//   SQL ctx:   { id:'sql', kind:'sql', sql, limit, offset, total, pane, els{...} }
+//   SQL ctx:   { id:'sql:<n>', kind:'sql', n, title, sql, limit, offset, total, pane, els{...} }
 let dash = null;
 
 const PAGE_SIZES = [25, 50, 100, 200];
@@ -854,6 +887,8 @@ const FILTER_OPS = ['=', '<>', '<', '<=', '>', '>=', 'like', 'ilike', 'is null',
 
 function panesEl() { return document.getElementById('dashPanes'); }
 function tableCtxId(t) { return 'table:' + t.schema + '.' + t.name; }
+function sqlCtxId(n) { return 'sql:' + n; }
+function tabsKey(slug) { return 'psqlcli.tabs.' + slug; }
 
 function resetDash(slug) {
   dash = {
@@ -862,8 +897,43 @@ function resetDash(slug) {
     schema: '',         // '' = all schemas (shared sidebar filter)
     readOnly: !!(state.databases[slug] && state.databases[slug].readOnly),
     panes: new Map(),   // ctxId -> context object (cached, only active shown)
+    order: [],          // ordered list of OPEN tab ctxIds (sidebar order)
     activeId: null,     // ctxId of the visible context, or null
+    queryNo: 0,         // per-database incrementing SQL tab counter
   };
+}
+
+// ---- per-database open-tab persistence (localStorage) ----
+// Stores { order:[ctxId], activeId, queryNo, tabs:{ctxId:descriptor} }.
+// Table descriptor: {kind:'table', schema, table, filters, orderBy}.
+// SQL descriptor:   {kind:'sql', n, sql}. Staged inline edits are NOT persisted.
+function persistTabs() {
+  if (!dash) return;
+  const tabs = {};
+  dash.order.forEach((id) => {
+    const ctx = dash.panes.get(id);
+    if (!ctx) return;
+    if (ctx.kind === 'table') {
+      tabs[id] = {
+        kind: 'table',
+        schema: ctx.table.schema,
+        table: ctx.table.name,
+        filters: (ctx.filters || []).map(f => ({ column: f.column, op: f.op, value: f.value })),
+        orderBy: (ctx.orderBy || []).map(o => ({ column: o.column, dir: o.dir })),
+      };
+    } else if (ctx.kind === 'sql') {
+      tabs[id] = { kind: 'sql', n: ctx.n, sql: (ctx.els && ctx.els.sql) ? ctx.els.sql.value : ctx.sql };
+    }
+  });
+  const payload = { order: dash.order.slice(), activeId: dash.activeId, queryNo: dash.queryNo, tabs };
+  try { localStorage.setItem(tabsKey(dash.slug), JSON.stringify(payload)); } catch (e) {}
+}
+function loadPersistedTabs(slug) {
+  try {
+    const v = JSON.parse(localStorage.getItem(tabsKey(slug)) || 'null');
+    if (v && Array.isArray(v.order) && v.tabs) return v;
+  } catch (e) {}
+  return null;
 }
 
 async function openDash(slug, fromRoute) {
@@ -887,12 +957,56 @@ async function openDash(slug, fromRoute) {
   const tablesWrap = document.getElementById('dashTables');
   tablesWrap.innerHTML = '';
   tablesWrap.append(skeletonList(8));
+  renderOpenTabs();
   try {
     const r = await api('GET', '/db/' + encodeURIComponent(slug) + '/tables');
     dash.tables = r.tables || [];
     populateSchemaSel();
     renderDashTables();
+    restoreTabs();
+    renderOpenTabs();
   } catch (e) { tablesWrap.innerHTML = ''; toast(e.message, true); }
+}
+
+// Rebuild the open tabs saved for this database (after tables are loaded), in
+// the saved order, and activate the saved activeId. Table tabs whose table no
+// longer exists are dropped. SQL tabs restore their editor text. Returns true
+// if anything was restored.
+function restoreTabs() {
+  const saved = loadPersistedTabs(dash.slug);
+  if (!saved) return false;
+  dash.queryNo = Number(saved.queryNo) || 0;
+  let restored = 0;
+  (saved.order || []).forEach((id) => {
+    const desc = saved.tabs[id];
+    if (!desc) return;
+    if (desc.kind === 'table') {
+      const t = dash.tables.find(x => x.schema === desc.schema && x.name === desc.table);
+      if (!t) return; // table gone -> drop
+      const tab = makeTableCtx(t);
+      tab.filters = (desc.filters || []).map(f => ({ column: f.column, op: f.op || '=', value: f.value || '' }));
+      tab.orderBy = (desc.orderBy || []).map(o => ({ column: o.column, dir: o.dir === 'desc' ? 'desc' : 'asc' }));
+      buildTablePane(tab);
+      dash.panes.set(tab.id, tab);
+      dash.order.push(tab.id);
+      restored++;
+      loadTableData(tab);
+    } else if (desc.kind === 'sql') {
+      const n = Number(desc.n) || (dash.queryNo + 1);
+      const tab = makeSqlCtx(n);
+      tab.sql = desc.sql || '';
+      buildSqlPane(tab);
+      dash.panes.set(tab.id, tab);
+      dash.order.push(tab.id);
+      if (n > dash.queryNo) dash.queryNo = n;
+      restored++;
+    }
+  });
+  if (!restored) return false;
+  const act = saved.activeId && dash.panes.has(saved.activeId) ? saved.activeId : null;
+  if (act) setContext(act, true);
+  else renderMainArea();
+  return true;
 }
 
 function closeDash(fromRoute) {
@@ -952,9 +1066,112 @@ function renderDashTables() {
       }, icon + t.name));
     });
   });
-  // Highlight the SQL-editor sidebar entry when the SQL context is active.
-  const sqlEntry = document.getElementById('dashSqlEntry');
-  if (sqlEntry) sqlEntry.classList.toggle('active', !!(active && active.kind === 'sql'));
+}
+
+// ---- open-tabs sidebar list (vertical, ordered, drag-reorderable) ----
+function tabTitle(ctx) {
+  return ctx.kind === 'table' ? ctx.table.name : (ctx.title || ('Query ' + ctx.n));
+}
+function tabIcon(ctx) {
+  if (ctx.kind === 'sql') return '⌑';
+  return ctx.table.type === 'view' ? '👁' : '📄';
+}
+function renderOpenTabs() {
+  const wrap = document.getElementById('dashOpenTabs');
+  if (!wrap || !dash) return;
+  wrap.innerHTML = '';
+  if (!dash.order.length) {
+    wrap.append(el('div', { class: 'open-tabs-empty' }, 'No open tabs.'));
+    return;
+  }
+  dash.order.forEach((id) => {
+    const ctx = dash.panes.get(id);
+    if (!ctx) return;
+    const isActive = id === dash.activeId;
+    const close = el('button', {
+      class: 'x', title: 'Close',
+      onclick: (e) => { e.stopPropagation(); closeTab(id); },
+    }, '✕');
+    const row = el('div', {
+      class: 'open-tab' + (isActive ? ' active' : ''),
+      draggable: 'true',
+      title: ctx.kind === 'table' ? (ctx.table.schema + '.' + ctx.table.name) : tabTitle(ctx),
+      onclick: () => selectTab(id),
+    },
+      el('span', { class: 'handle', title: 'Drag to reorder' }, '⋮'),
+      el('span', { class: 'ot-icon' }, tabIcon(ctx)),
+      el('span', { class: 'ot-title' }, tabTitle(ctx)),
+      close);
+    row.dataset.ctxid = id;
+    row.addEventListener('dragstart', (e) => {
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', id); } catch (err) {}
+    });
+    row.addEventListener('dragend', () => {
+      row.classList.remove('dragging');
+      wrap.querySelectorAll('.open-tab').forEach(c => c.classList.remove('drop-before', 'drop-after'));
+    });
+    row.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const rect = row.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      row.classList.toggle('drop-after', after);
+      row.classList.toggle('drop-before', !after);
+    });
+    row.addEventListener('dragleave', () => { row.classList.remove('drop-before', 'drop-after'); });
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const from = (() => { try { return e.dataTransfer.getData('text/plain'); } catch (err) { return ''; } })();
+      const rect = row.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      row.classList.remove('drop-before', 'drop-after');
+      if (from) moveTab(from, id, after);
+    });
+    wrap.append(row);
+  });
+}
+// Reorder dash.order (does NOT change which tab is active). Re-render + persist.
+function moveTab(fromId, toId, after) {
+  if (fromId === toId) return;
+  const from = dash.order.indexOf(fromId);
+  if (from === -1) return;
+  dash.order.splice(from, 1);
+  let to = dash.order.indexOf(toId);
+  if (to === -1) { dash.order.splice(from, 0, fromId); return; }
+  if (after) to += 1;
+  dash.order.splice(to, 0, fromId);
+  renderOpenTabs();
+  persistTabs();
+}
+// Click an open-tab row -> push its URL, then activate.
+function selectTab(id) {
+  const ctx = dash.panes.get(id);
+  if (!ctx) return;
+  if (ctx.kind === 'table') {
+    navigate('/database/' + enc(dash.slug) + '/table/' + enc(ctx.table.schema) + '/' + enc(ctx.table.name));
+  } else {
+    navigate('/database/' + enc(dash.slug) + '/query/' + ctx.n);
+  }
+  setContext(id, true);
+}
+// Close an open tab. The active tab activates a neighbour (or empty-main).
+function closeTab(id) {
+  const idx = dash.order.indexOf(id);
+  if (idx === -1) return;
+  const ctx = dash.panes.get(id);
+  if (ctx && ctx.pane) ctx.pane.remove();
+  dash.panes.delete(id);
+  dash.order.splice(idx, 1);
+  if (dash.activeId === id) {
+    const neighbour = dash.order[idx] || dash.order[idx - 1] || null;
+    if (neighbour) { selectTab(neighbour); }
+    else { navigate('/database/' + enc(dash.slug)); setContext(null, true); }
+  } else {
+    renderOpenTabs();
+  }
+  persistTabs();
 }
 
 // ---- context activation (one at a time, sidebar-driven) ----
@@ -970,6 +1187,8 @@ function setContext(id, fromRoute) {
   dash.panes.forEach((ctx, cid) => { ctx.pane.classList.toggle('active', cid === id); });
   renderMainArea();
   renderDashTables();
+  renderOpenTabs();
+  persistTabs();
   const t = activeCtx();
   if (t && t.kind === 'sql' && t.els.sql) t.els.sql.focus();
 }
@@ -980,7 +1199,7 @@ function renderMainArea() {
   if (!dash.activeId) {
     if (!existing) {
       panes.append(el('div', { class: 'empty-main' },
-        'Pick a table on the left, or open the SQL editor.'));
+        'Pick a table on the left, or click ＋ Query for a SQL editor.'));
     }
     return;
   }
@@ -993,13 +1212,10 @@ function selectTable(t) {
   navigate('/database/' + enc(dash.slug) + '/table/' + enc(t.schema) + '/' + enc(t.name));
   openTableContext(t, true);
 }
-// Activate a table context, building (and caching) its pane on first use so
-// returning preserves filters/sort/staged edits.
-async function openTableContext(t, fromRoute) {
-  const id = tableCtxId(t);
-  if (dash.panes.has(id)) { setContext(id, fromRoute); return; }
-  const tab = {
-    id,
+// Build a fresh table-context state object (no pane, no data yet).
+function makeTableCtx(t) {
+  return {
+    id: tableCtxId(t),
     kind: 'table',
     table: t,
     columns: [],
@@ -1015,9 +1231,10 @@ async function openTableContext(t, fromRoute) {
     gridColumns: [],     // column order of last-loaded rows
     els: {},
   };
-  buildTablePane(tab);
-  dash.panes.set(id, tab);
-  setContext(id, fromRoute);
+}
+// Fetch columns + pk, then the first page of rows for a built table pane.
+async function loadTableData(tab) {
+  const t = tab.table;
   showGridSkeleton(tab.els.grid, 5);
   try {
     const r = await api('GET', '/db/' + encodeURIComponent(dash.slug) +
@@ -1034,7 +1251,22 @@ async function openTableContext(t, fromRoute) {
   } else {
     tab.pk = [];
   }
+  renderFilters(tab);
   await loadBrowse(tab);
+}
+// Activate a table context, building (and caching) its pane on first use so
+// returning preserves filters/sort/staged edits. Opening adds it to the
+// open-tabs list and persists.
+async function openTableContext(t, fromRoute) {
+  const id = tableCtxId(t);
+  if (dash.panes.has(id)) { setContext(id, fromRoute); return; }
+  const tab = makeTableCtx(t);
+  buildTablePane(tab);
+  dash.panes.set(id, tab);
+  dash.order.push(id);
+  setContext(id, fromRoute);
+  persistTabs();
+  await loadTableData(tab);
 }
 
 function buildTablePane(tab) {
@@ -1123,6 +1355,8 @@ function activeFilters(tab) {
 
 async function loadBrowse(tab) {
   if (!dash || !tab || tab.kind !== 'table') return;
+  // Persist the (possibly-changed) filters/sort for this table tab.
+  persistTabs();
   // A fresh load invalidates any staged edits (rowIndex would no longer match).
   if (tab.edits) tab.edits.clear();
   const filters = activeFilters(tab);
@@ -1189,20 +1423,14 @@ function sortBy(tab, col, shift) {
   loadBrowse(tab);
 }
 
-// ---- SQL context (single) ----
-// User clicked "SQL editor" in the sidebar -> push URL, then activate.
-function selectSql() {
-  if (!dash) return;
-  navigate('/database/' + enc(dash.slug) + '/query');
-  openSqlContext(true);
-}
-// Activate the single SQL context, building (and caching) it on first use.
-function openSqlContext(fromRoute) {
-  if (!dash) return;
-  if (dash.panes.has('sql')) { setContext('sql', fromRoute); return; }
-  const tab = {
-    id: 'sql',
+// ---- SQL contexts (multiple) ----
+// Build a fresh SQL-context state object numbered n (no pane yet).
+function makeSqlCtx(n) {
+  return {
+    id: sqlCtxId(n),
     kind: 'sql',
+    n,
+    title: 'Query ' + n,
     sql: '',
     limit: 50,
     offset: 0,
@@ -1210,9 +1438,46 @@ function openSqlContext(fromRoute) {
     hasMore: false,
     els: {},
   };
+}
+// ＋ Query button / new SQL tab: allocate the next number, build it, activate.
+function newQueryTab() {
+  if (!dash) return;
+  dash.queryNo += 1;
+  const n = dash.queryNo;
+  const tab = makeSqlCtx(n);
   buildSqlPane(tab);
-  dash.panes.set('sql', tab);
-  setContext('sql', fromRoute);
+  dash.panes.set(tab.id, tab);
+  dash.order.push(tab.id);
+  navigate('/database/' + enc(dash.slug) + '/query/' + n);
+  setContext(tab.id, true);
+  persistTabs();
+}
+// Activate a SQL context. With n: that specific tab (create if absent). Without
+// n: the most-recent open SQL tab, or a new one. Adds to open-tabs + persists.
+function openSqlContext(fromRoute, n) {
+  if (!dash) return;
+  if (n == null) {
+    // pick the most recently-ordered open SQL tab, else create a new one.
+    for (let i = dash.order.length - 1; i >= 0; i--) {
+      const ctx = dash.panes.get(dash.order[i]);
+      if (ctx && ctx.kind === 'sql') {
+        if (!fromRoute) navigate('/database/' + enc(dash.slug) + '/query/' + ctx.n);
+        setContext(ctx.id, fromRoute);
+        return;
+      }
+    }
+    newQueryTab();
+    return;
+  }
+  const id = sqlCtxId(n);
+  if (dash.panes.has(id)) { setContext(id, fromRoute); return; }
+  const tab = makeSqlCtx(n);
+  buildSqlPane(tab);
+  dash.panes.set(id, tab);
+  dash.order.push(id);
+  if (n > dash.queryNo) dash.queryNo = n;
+  setContext(id, fromRoute);
+  persistTabs();
 }
 
 function buildSqlPane(tab) {
@@ -1220,7 +1485,7 @@ function buildSqlPane(tab) {
   const badge = el('span', { class: 'badge ' + (ro ? 'ro' : 'rw') }, ro ? 'read-only' : 'read-write');
   const sql = el('textarea', { placeholder: 'SELECT * FROM …' });
   sql.value = tab.sql;
-  sql.addEventListener('input', () => { tab.sql = sql.value; });
+  sql.addEventListener('input', () => { tab.sql = sql.value; persistTabs(); });
   sql.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); tab.offset = 0; runQuery(tab); }
   });
@@ -1518,7 +1783,7 @@ async function saveEdits(tab) {
 }
 
 document.getElementById('dashCloseBtn').onclick = () => closeDash();
-document.getElementById('dashSqlEntry').onclick = () => selectSql();
+document.getElementById('dashAddQueryBtn').onclick = () => newQueryTab();
 document.getElementById('dashTableSearch').oninput = renderDashTables;
 document.getElementById('dashSchemaSel').onchange = (e) => { dash.schema = e.target.value; renderDashTables(); };
 document.addEventListener('keydown', (e) => {
