@@ -103,33 +103,34 @@ button:disabled:hover { border-color: var(--border); }
 .dash-tables .tbl.active { background: var(--accent); color: #fff; }
 .dash-side .nav-divider { border-top: 1px solid var(--border); margin: 0; flex: none; }
 
-/* ---- open tabs (vertical, ordered, drag-reorderable) ---- */
-.open-tabs { flex: none; display: flex; flex-direction: column; max-height: 45%;
-  min-height: 0; }
-.open-tabs .open-tabs-head { font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
-  color: var(--muted); padding: 10px 12px 4px; flex: none; }
-.open-tabs .open-tab-list { overflow: auto; flex: 1; min-height: 0; padding: 0 0 4px; }
-.open-tabs .open-tabs-empty { color: var(--muted); font-size: 12px; padding: 4px 12px 8px; }
-.open-tab { display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 6px;
-  cursor: pointer; font-size: 13px; border-left: 2px solid transparent; }
-.open-tab:hover { background: var(--panel2); }
-.open-tab.active { background: var(--accent); color: #fff; border-left-color: #fff; }
-.open-tab .handle { cursor: grab; color: var(--muted); font-size: 14px; user-select: none;
+/* ---- open tabs (horizontal top bar, ordered, drag-reorderable) ---- */
+.dash-tabbar { flex: none; display: flex; align-items: stretch; gap: 0;
+  overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--border);
+  background: var(--panel); padding: 0 4px; min-height: 40px; white-space: nowrap; }
+.dash-tab { display: inline-flex; align-items: center; gap: 6px; flex: none;
+  padding: 8px 10px; cursor: pointer; font-size: 13px; max-width: 220px;
+  border: 1px solid transparent; border-bottom: none; border-radius: 7px 7px 0 0;
+  margin-top: 4px; }
+.dash-tab:hover { background: var(--panel2); }
+.dash-tab.active { background: var(--bg); border-color: var(--border);
+  color: var(--text); position: relative; }
+.dash-tab.active::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px;
+  height: 1px; background: var(--bg); }
+.dash-tab .handle { cursor: grab; color: var(--muted); font-size: 14px; user-select: none;
   flex: none; padding: 0 1px; }
-.open-tab.active .handle { color: rgba(255,255,255,.8); }
-.open-tab .handle:active { cursor: grabbing; }
-.open-tab .ot-icon { flex: none; }
-.open-tab .ot-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden;
+.dash-tab .handle:active { cursor: grabbing; }
+.dash-tab .ot-icon { flex: none; }
+.dash-tab .ot-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
-.open-tab .x { flex: none; color: var(--muted); border: none; background: none; padding: 0 4px;
-  border-radius: 4px; font-size: 13px; line-height: 1; opacity: 0; }
-.open-tab:hover .x { opacity: 1; }
-.open-tab.active .x { color: rgba(255,255,255,.85); opacity: 1; }
-.open-tab .x:hover { color: var(--danger); border: none; }
-.open-tab.dragging { opacity: .45; }
-.open-tab.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
-.open-tab.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
-.open-tabs .add-query { margin: 4px 10px 8px; flex: none; text-align: left; }
+.dash-tab .x { flex: none; color: var(--muted); border: none; background: none; padding: 0 4px;
+  border-radius: 4px; font-size: 13px; line-height: 1; opacity: .5; }
+.dash-tab:hover .x { opacity: 1; }
+.dash-tab.active .x { opacity: 1; }
+.dash-tab .x:hover { color: var(--danger); border: none; }
+.dash-tab.dragging { opacity: .45; }
+.dash-tab.drop-left { box-shadow: inset 2px 0 0 0 var(--accent); }
+.dash-tab.drop-right { box-shadow: inset -2px 0 0 0 var(--accent); }
+.dash-tabbar .add-query { flex: none; align-self: center; margin: 0 4px; }
 .dash-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .dash-panes { flex: 1; display: flex; min-height: 0; }
 .dash-pane { flex: 1; display: none; flex-direction: column; min-height: 0; padding: 12px; min-width: 0; }
@@ -332,12 +333,6 @@ export const INDEX_HTML = `<!doctype html>
   </div>
   <div class="dash-body">
     <div class="dash-side">
-      <div class="open-tabs">
-        <div class="open-tabs-head">Open tabs</div>
-        <div class="open-tab-list" id="dashOpenTabs"></div>
-        <button class="small add-query" id="dashAddQueryBtn">＋ Query</button>
-      </div>
-      <div class="nav-divider"></div>
       <div class="search">
         <select id="dashSchemaSel" class="schema-sel"></select>
         <input id="dashTableSearch" placeholder="Filter tables…" />
@@ -345,6 +340,7 @@ export const INDEX_HTML = `<!doctype html>
       <div class="dash-tables" id="dashTables"></div>
     </div>
     <div class="dash-main">
+      <div class="dash-tabbar" id="dashTabBar"></div>
       <div class="dash-panes" id="dashPanes"></div>
     </div>
   </div>
@@ -1068,7 +1064,7 @@ function renderDashTables() {
   });
 }
 
-// ---- open-tabs sidebar list (vertical, ordered, drag-reorderable) ----
+// ---- open-tabs top bar (horizontal, ordered, drag-reorderable) ----
 function tabTitle(ctx) {
   return ctx.kind === 'table' ? ctx.table.name : (ctx.title || ('Query ' + ctx.n));
 }
@@ -1077,13 +1073,9 @@ function tabIcon(ctx) {
   return ctx.table.type === 'view' ? '👁' : '📄';
 }
 function renderOpenTabs() {
-  const wrap = document.getElementById('dashOpenTabs');
+  const wrap = document.getElementById('dashTabBar');
   if (!wrap || !dash) return;
   wrap.innerHTML = '';
-  if (!dash.order.length) {
-    wrap.append(el('div', { class: 'open-tabs-empty' }, 'No open tabs.'));
-    return;
-  }
   dash.order.forEach((id) => {
     const ctx = dash.panes.get(id);
     if (!ctx) return;
@@ -1093,7 +1085,7 @@ function renderOpenTabs() {
       onclick: (e) => { e.stopPropagation(); closeTab(id); },
     }, '✕');
     const row = el('div', {
-      class: 'open-tab' + (isActive ? ' active' : ''),
+      class: 'dash-tab' + (isActive ? ' active' : ''),
       draggable: 'true',
       title: ctx.kind === 'table' ? (ctx.table.schema + '.' + ctx.table.name) : tabTitle(ctx),
       onclick: () => selectTab(id),
@@ -1110,27 +1102,32 @@ function renderOpenTabs() {
     });
     row.addEventListener('dragend', () => {
       row.classList.remove('dragging');
-      wrap.querySelectorAll('.open-tab').forEach(c => c.classList.remove('drop-before', 'drop-after'));
+      wrap.querySelectorAll('.dash-tab').forEach(c => c.classList.remove('drop-left', 'drop-right'));
     });
     row.addEventListener('dragover', (e) => {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
       const rect = row.getBoundingClientRect();
-      const after = (e.clientY - rect.top) > rect.height / 2;
-      row.classList.toggle('drop-after', after);
-      row.classList.toggle('drop-before', !after);
+      const after = (e.clientX - rect.left) > rect.width / 2;
+      row.classList.toggle('drop-right', after);
+      row.classList.toggle('drop-left', !after);
     });
-    row.addEventListener('dragleave', () => { row.classList.remove('drop-before', 'drop-after'); });
+    row.addEventListener('dragleave', () => { row.classList.remove('drop-left', 'drop-right'); });
     row.addEventListener('drop', (e) => {
       e.preventDefault();
       const from = (() => { try { return e.dataTransfer.getData('text/plain'); } catch (err) { return ''; } })();
       const rect = row.getBoundingClientRect();
-      const after = (e.clientY - rect.top) > rect.height / 2;
-      row.classList.remove('drop-before', 'drop-after');
+      const after = (e.clientX - rect.left) > rect.width / 2;
+      row.classList.remove('drop-left', 'drop-right');
       if (from) moveTab(from, id, after);
     });
     wrap.append(row);
   });
+  // ＋ Query affordance lives at the end of the bar.
+  wrap.append(el('button', {
+    class: 'small add-query', id: 'dashAddQueryBtn', title: 'New SQL query tab',
+    onclick: () => newQueryTab(),
+  }, '＋ Query'));
 }
 // Reorder dash.order (does NOT change which tab is active). Re-render + persist.
 function moveTab(fromId, toId, after) {
@@ -1783,7 +1780,6 @@ async function saveEdits(tab) {
 }
 
 document.getElementById('dashCloseBtn').onclick = () => closeDash();
-document.getElementById('dashAddQueryBtn').onclick = () => newQueryTab();
 document.getElementById('dashTableSearch').oninput = renderDashTables;
 document.getElementById('dashSchemaSel').onchange = (e) => { dash.schema = e.target.value; renderDashTables(); };
 document.addEventListener('keydown', (e) => {

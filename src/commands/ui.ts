@@ -45,11 +45,41 @@ function openBrowser(url: string): void {
   }
 }
 
+/**
+ * Default ports tried when the user doesn't pass --port. A STABLE port matters:
+ * the UI persists open tabs / recents in the browser's localStorage, which is
+ * keyed by origin (host:port). A random port would reset that state every launch
+ * — so we reuse a fixed port and only bump if it's already taken.
+ */
+const DEFAULT_PORTS = [7733, 7734, 7735, 7736, 7737];
+
+async function listenStable(): Promise<{ server: Awaited<ReturnType<typeof startUiServer>>; stable: boolean }> {
+  for (const p of DEFAULT_PORTS) {
+    try {
+      return { server: await startUiServer({ port: p }), stable: true };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== 'EADDRINUSE') throw err;
+    }
+  }
+  // All preferred ports busy — fall back to a random one (state won't persist).
+  return { server: await startUiServer({}), stable: false };
+}
+
 export async function cmdUi(args: string[]): Promise<number> {
   const { port, open } = parseUiFlags(args);
-  const server = await startUiServer(port !== undefined ? { port } : {});
+  let server: Awaited<ReturnType<typeof startUiServer>>;
+  let stable = true;
+  if (port !== undefined) {
+    server = await startUiServer({ port });
+  } else {
+    ({ server, stable } = await listenStable());
+  }
 
   console.log(`psql-cli UI: ${server.url}`);
+  if (!stable) {
+    console.log('Note: preferred ports were busy, using a random one — open tabs may not persist this session.');
+  }
   console.log('Press Ctrl+C to stop.');
 
   if (open) openBrowser(server.url);
